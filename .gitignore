@@ -1,0 +1,9 @@
+.env
+.pytest_cache/
+__pycache__/
+*.pyc
+*.sqlite3
+*.db
+generated/cvs/*.docx
+data/*.db
+data/resume_profile.json
