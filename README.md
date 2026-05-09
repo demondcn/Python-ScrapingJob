@@ -12,6 +12,8 @@ Este proyecto ayuda a organizar una busqueda laboral tecnica orientada a roles j
 - Cloud Support
 - QA Junior
 - Backend Junior
+- Frontend Junior
+- Fullstack Junior
 
 No autoaplica, no usa bots para operar cuentas reales y no hace scraping agresivo.
 
@@ -65,6 +67,9 @@ Variables principales en `.env`:
 - `JOBOPS_SCRAPER_USER_AGENT`: user agent del monitor responsable
 - `JOBOPS_MAX_RESULTS_PER_SOURCE`: maximo de resultados por fuente
 - `JOBOPS_MIN_MONITOR_INTERVAL_MINUTES`: intervalo minimo entre revisiones
+- `JOBOPS_TIMEZONE`: zona horaria para mensajes y fechas
+- `JOBOPS_TELEGRAM_DIGEST_MAX_JOBS`: maximo de ofertas por digest
+- `JOBOPS_TELEGRAM_MAX_MESSAGE_CHARS`: limite aproximado por parte del digest
 - `TELEGRAM_BOT_TOKEN`: token del bot
 - `TELEGRAM_CHAT_ID`: chat id destino
 - `GMAIL_EMAIL`: correo para IMAP
@@ -126,6 +131,20 @@ Generar CV:
 python main.py offer generate-cv --id 1
 ```
 
+Limpiar solo ofertas guardadas:
+
+```powershell
+python main.py offer clear
+python main.py offer clear --yes
+python main.py offer clear --portal computrabajo --yes
+```
+
+Ver ofertas pendientes de alerta:
+
+```powershell
+python main.py offer pending-alerts
+```
+
 Ejecutar escaneo diario preparado:
 
 ```powershell
@@ -144,6 +163,9 @@ python main.py send-summary
 
 Si faltan credenciales, la aplicacion no falla: solo mostrara una advertencia.
 
+Las alertas de Telegram muestran la fecha/hora de publicacion cuando el portal la permite y siempre incluyen la fecha/hora de deteccion por JobOps.
+El monitor usa modo digest por ciclo: no manda un mensaje por cada oferta, sino un resumen agrupado de las ofertas notificables encontradas en el ciclo. Si el resumen es muy largo, lo divide en partes; si hay demasiadas ofertas, limita segun configuracion.
+
 ## Gmail
 
 La integracion esta preparada para usarse con IMAP y App Password de Gmail, pero el lector actual es conservador y devuelve resultados vacios hasta que se configure una extraccion real de correos.
@@ -161,6 +183,9 @@ python main.py resume show
 python main.py resume generate-ats --target devops_trainee
 python main.py resume generate-ats --target soporte_aplicaciones
 python main.py resume generate-ats --target infraestructura_junior
+python main.py resume generate-ats --target backend_junior
+python main.py resume generate-ats --target frontend_junior
+python main.py resume generate-ats --target fullstack_junior
 python main.py resume generate-ats --target soporte_aplicaciones --job-id 1
 ```
 
@@ -172,6 +197,7 @@ Perfiles objetivo disponibles:
 - `cloud_support`
 - `qa_junior`
 - `backend_junior`
+- `frontend_junior`
 - `fullstack_junior`
 
 Comportamiento del generador ATS:
@@ -197,7 +223,8 @@ Flujo recomendado:
 1. Crear una busqueda manual en el portal con filtros como `junior`, `trainee`, `ultimas 24 horas`, `Bogota`, `remoto`, `hibrido`, etc.
 2. Copiar la URL publica resultante.
 3. Registrar la fuente en JobOps.
-4. Probar la fuente y luego ejecutar el monitor.
+4. Ajustar el intervalo de revision si hace falta.
+5. Probar la fuente y luego ejecutar el monitor.
 
 Portales soportados:
 
@@ -216,21 +243,40 @@ Comandos:
 python main.py sources add --portal linkedin --target-role devops_trainee --url "https://www.linkedin.com/jobs/search/?keywords=DevOps%20Trainee&location=Colombia&f_TPR=r86400" --interval 15
 python main.py sources add --portal computrabajo --target-role soporte_aplicaciones --url "URL_DE_COMPUTRABAJO_ORDENADA_POR_FECHA" --interval 15
 python main.py sources list
+python main.py sources update-interval --id 1 --interval 10
+python main.py sources update-interval --portal computrabajo --interval 10
+python main.py sources unpause --id 14
+python main.py sources unpause --portal elempleo
+python main.py sources disable-blocked
 python main.py sources test --id 1
+python main.py sources test --id 14 --debug-html
+python main.py sources test --id 14 --show-discarded
 python main.py monitor fresh
+python main.py monitor fresh --notify-pending
 python main.py monitor watch --interval 15
 python main.py offer fresh
 python main.py offer list --portal linkedin
+python main.py offer pending-alerts
+python main.py notifications retry-pending
 ```
 
 Comportamiento:
 
 - Usa `requests + BeautifulSoup` sobre HTML publico cuando es posible
 - Si un portal bloquea, pide captcha o exige login, registra el error y continua con las demas fuentes
+- Si una fuente falla repetidamente por captcha, login, `403`, `429` o bloqueo publico, acumula `failure_count` y se pausa automaticamente por 24 horas al tercer fallo
+- Las fuentes pausadas no se revisan en `watch` mientras `paused_until` siga en el futuro, y pueden reanudarse con `sources unpause`
+- `sources disable-blocked` desactiva las fuentes que ya acumularon bloqueos repetidos
+- `sources test --debug-html` guarda el HTML real y metadatos de la respuesta en `debug/` para depurar falsos positivos de captcha o bloqueo
+- Antes de guardar una oferta, JobOps valida si realmente coincide con el `target-role` de la fuente; si no coincide, la descarta y no la notifica
+- `sources test --show-discarded` muestra ejemplos de ofertas descartadas con razones, keywords detectadas y score preliminar
 - Evita duplicados por URL normalizada y hash
 - Guarda ofertas nuevas en SQLite
 - Calcula compatibilidad con el matcher existente
-- Si la oferta supera `JOBOPS_MATCH_THRESHOLD`, envia alerta por Telegram con el link oficial y comandos sugeridos para CV ATS y cambio de estado
+- Si la oferta supera `JOBOPS_MATCH_THRESHOLD`, la agrega al digest del ciclo y envia un resumen agrupado por Telegram con link oficial y comandos sugeridos para CV ATS y cambio de estado
+- `Duplicado` significa que la oferta ya estaba guardada; no que la alerta quede descartada
+- Si una oferta supera el umbral pero no fue enviada por Telegram, queda como pendiente de alerta y puede reintentarse despues
+- `offer clear` borra ofertas, hashes vistos y registros relacionados, pero conserva las fuentes configuradas
 
 Ejemplo de alerta Telegram:
 
@@ -239,6 +285,41 @@ Ejemplo de alerta Telegram:
 - Link oficial para aplicar manualmente
 - Comando `python main.py resume generate-ats --target ... --job-id ...`
 - Comando `python main.py offer update-status --id ... --status applied`
+
+## Auditoria de ofertas descartadas
+
+Las ofertas descartadas no se guardan como ofertas reales en `job_offers`. Se guardan aparte en `discarded_jobs` para depuracion y para revisar si el filtro esta siendo demasiado estricto.
+
+Esto permite:
+
+- revisar despues que datos tenia cada oferta descartada
+- ver la razon exacta del descarte
+- inspeccionar keywords detectadas y score preliminar
+- reprocesar descartadas con el matcher actual
+
+Comandos principales:
+
+```powershell
+python main.py discarded list
+python main.py discarded list --portal magneto
+python main.py discarded list --target-role frontend_junior
+python main.py discarded list --portal elempleo --limit 50
+python main.py discarded show --id 1
+python main.py discarded clear --yes
+python main.py discarded clear --portal magneto --yes
+python main.py discarded reprocess --id 1
+python main.py discarded export --file descartadas.csv
+python main.py discarded export --file descartadas.json --portal magneto
+```
+
+Comportamiento:
+
+- `discarded list` muestra por defecto hasta 20 resultados, ordenados por la descartada mas reciente; usa `--limit` para ampliar el listado
+- Si `monitor fresh` muestra `descartadas=N`, esas ofertas quedan disponibles en `discarded_jobs`
+- `discarded list` permite verlas sin contaminar `job_offers`
+- `discarded show` muestra el detalle completo para ajustar reglas si hace falta
+- Si una descartada luego deja de ser descartada, puede entrar como `job_offer` normal
+- `discarded reprocess` vuelve a evaluarla con el matcher actual y, si ya aplica, la mueve a `job_offers`
 
 ## Roadmap
 

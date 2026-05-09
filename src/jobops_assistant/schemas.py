@@ -10,6 +10,13 @@ class MatchResult:
 
 
 @dataclass(slots=True)
+class RelevanceAnalysis:
+    relevant: bool
+    reasons: list[str]
+    detected_keywords: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ParsedJobOffer:
     title: str = ""
     company: str = ""

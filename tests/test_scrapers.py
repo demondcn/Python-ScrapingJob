@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from src.jobops_assistant.models import JobSearchSource
-from src.jobops_assistant.scrapers.base_scraper import SourceBlockedError
+from src.jobops_assistant.scrapers.base_scraper import CaptchaRequiredError, SourceBlockedError
 from src.jobops_assistant.scrapers.computrabajo_scraper import ComputrabajoJobScraper
 from src.jobops_assistant.scrapers.elempleo_scraper import ElempleoJobScraper
 from src.jobops_assistant.scrapers.getonboard_scraper import GetOnBoardJobScraper
@@ -27,6 +27,8 @@ def _settings(tmp_path: Path) -> Settings:
         scraper_user_agent="JobOps Test Agent",
         max_results_per_source=25,
         min_monitor_interval_minutes=10,
+        telegram_digest_max_jobs=10,
+        telegram_max_message_chars=3500,
         templates_dir=tmp_path / "templates",
         generated_dir=tmp_path / "generated",
     )
@@ -185,9 +187,11 @@ def test_scrapers_extract_public_job_cards(tmp_path: Path, monkeypatch, scraper_
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int, text: str = "") -> None:
+    def __init__(self, status_code: int, text: str = "", url: str = "", content_type: str = "text/html; charset=utf-8") -> None:
         self.status_code = status_code
         self.text = text
+        self.url = url
+        self.headers = {"Content-Type": content_type}
 
     def raise_for_status(self) -> None:
         return None
@@ -336,3 +340,91 @@ def test_computrabajo_scraper_detects_captcha_in_detail_without_breaking(tmp_pat
     assert len(jobs) == 1
     assert jobs[0].company == "Empresa Card"
     assert jobs[0].description == ""
+
+
+def test_elempleo_html_with_visible_offers_is_not_marked_as_captcha(tmp_path: Path):
+    html = """
+    <html>
+      <body>
+        <script>window.protection = 'captcha token passive';</script>
+        <section>
+          <h1>Ofertas de Empleo Junior backend publicados hoy</h1>
+          <article>
+            <h2><a href="/co/ofertas-empleo/backend-junior-1">Backend Junior</a></h2>
+            <div class="company">ABC Tecnologia</div>
+            <div class="location">Bogotá / Híbrido</div>
+            <div class="salary">$4.000.000</div>
+            <div class="contract">Término indefinido</div>
+            <time>Hoy</time>
+            <p class="description">Trabajo con APIs y bases de datos.</p>
+          </article>
+        </section>
+      </body>
+    </html>
+    """
+    scraper = ElempleoJobScraper(_settings(tmp_path))
+
+    jobs = scraper.parse_search_results(html, _source("elempleo"))
+
+    assert len(jobs) == 1
+    assert jobs[0].title == "Backend Junior"
+    assert jobs[0].company == "ABC Tecnologia"
+    assert jobs[0].location == "Bogotá / Híbrido"
+    assert jobs[0].modality in {"Híbrido", "HÃ­brido"}
+    assert jobs[0].salary == "$4.000.000"
+    assert jobs[0].raw_posted_text == "Hoy"
+
+
+def test_elempleo_cloudflare_turnstile_is_marked_as_block(tmp_path: Path):
+    scraper = ElempleoJobScraper(
+        _settings(tmp_path),
+        session=_FakeSession(
+            _FakeResponse(
+                200,
+                """
+                <html>
+                  <body>
+                    <div class="cf-turnstile"></div>
+                    <p>Verify you are human</p>
+                  </body>
+                </html>
+                """,
+                url="https://www.elempleo.com/challenge",
+            )
+        ),
+    )
+
+    with pytest.raises(CaptchaRequiredError):
+        scraper.fetch_search_results(_source("elempleo"))
+
+    snapshot = scraper.get_last_debug_snapshot()
+    assert snapshot is not None
+    assert "captcha" in snapshot.block_reason or "turnstile" in snapshot.block_reason
+
+
+def test_elempleo_scraper_extracts_public_fields_from_simulated_html(tmp_path: Path):
+    html = """
+    <html>
+      <body>
+        <article>
+          <h2><a href="/co/ofertas-empleo/junior-backend-123">Junior Backend</a></h2>
+          <div class="company">XYZ Tech SAS</div>
+          <div class="location">Bogotá / Remoto</div>
+          <div class="salary">$5.500.000</div>
+          <div class="contract">Contrato indefinido</div>
+          <time>Hoy</time>
+          <p class="description">Desarrollo de APIs REST y soporte a integraciones.</p>
+        </article>
+      </body>
+    </html>
+    """
+    scraper = ElempleoJobScraper(_settings(tmp_path))
+
+    jobs = scraper.parse_search_results(html, _source("elempleo"))
+
+    assert len(jobs) == 1
+    assert jobs[0].title == "Junior Backend"
+    assert jobs[0].company == "XYZ Tech SAS"
+    assert jobs[0].location == "Bogotá / Remoto"
+    assert jobs[0].modality == "Remoto"
+    assert jobs[0].url == "https://elempleo.example/co/ofertas-empleo/junior-backend-123"

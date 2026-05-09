@@ -61,20 +61,35 @@ TARGET_KEYWORDS: dict[str, list[str]] = {
         "sql",
     ],
     "backend_junior": [
+        "backend",
         "python",
         "java",
         "node.js",
         "express",
+        "apis",
         "sql",
         "postgresql",
         "mysql",
         "git",
     ],
-    "fullstack_junior": [
+    "frontend_junior": [
+        "frontend",
         "react",
         "next.js",
         "javascript",
         "typescript",
+        "interfaces",
+        "responsive",
+        "vercel",
+        "git",
+    ],
+    "fullstack_junior": [
+        "fullstack",
+        "react",
+        "next.js",
+        "javascript",
+        "typescript",
+        "node.js",
         "postgresql",
         "mysql",
         "git",
@@ -114,6 +129,11 @@ TARGET_SUMMARIES: dict[str, str] = {
         "Tecnólogo en Desarrollo de Software con experiencia práctica en desarrollo de aplicaciones, bases de "
         "datos y lógica de negocio. Con conocimientos en Python, Java, SQL y construcción de soluciones web "
         "orientadas al backend."
+    ),
+    "frontend_junior": (
+        "TecnÃ³logo en Desarrollo de Software con experiencia prÃ¡ctica en desarrollo frontend, construcciÃ³n de "
+        "interfaces, consumo de APIs y despliegue de proyectos web. Ha trabajado con React, Next.js, JavaScript, "
+        "TypeScript y diseÃ±o responsivo en proyectos reales."
     ),
     "fullstack_junior": (
         "Tecnólogo en Desarrollo de Software con experiencia práctica en desarrollo web full stack, interfaces "
@@ -191,6 +211,13 @@ EXPERIENCE_PRIORITY_BY_TARGET: dict[str, list[str]] = {
         "universidad de cundinamarca|auxiliar de oficina ii",
         "chocontano restaurante|desarrollador frontend y mobile",
         "charles barber|desarrollador android",
+    ],
+    "frontend_junior": [
+        "kepri holistica|desarrollador frontend web",
+        "chocontano restaurante|desarrollador frontend y mobile",
+        "emprex360|desarrollador full stack web",
+        "charles barber|desarrollador android",
+        "universidad de cundinamarca|auxiliar de oficina ii",
     ],
 }
 CANONICAL_EXPERIENCE_BULLETS: dict[str, list[str]] = {
@@ -854,6 +881,37 @@ def _build_target_sections(
                     ("Línea de comandos", signals["command_line"]),
                     ("Despliegue de aplicaciones", signals["deployment"]),
                     ("Documentación técnica", signals["documentation"]),
+                ),
+            ),
+        ]
+    if target == "frontend_junior":
+        return [
+            (
+                "Frontend y UI",
+                _skills_if(
+                    ("React", has_tech("React")),
+                    ("Next.js", has_tech("Next.js")),
+                    ("JavaScript", has_tech("JavaScript")),
+                    ("TypeScript", has_tech("TypeScript")),
+                    ("Interfaces", signals["web_apps"]),
+                    ("DiseÃ±o responsivo", "responsive" in str(signals.get("_context", "")) or "responsivo" in str(signals.get("_context", ""))),
+                ),
+            ),
+            (
+                "IntegraciÃ³n web",
+                _skills_if(
+                    ("Consumo de APIs", signals["web_apps"]),
+                    ("Vercel", has_tech("Vercel")),
+                    ("Git", has_tech("Git")),
+                    ("GitHub", has_tech("GitHub")),
+                ),
+            ),
+            (
+                "ConstrucciÃ³n de productos",
+                _skills_if(
+                    ("E-Commerce", "e-commerce" in str(signals.get("_context", ""))),
+                    ("Componentes reutilizables", has_tech("React") or has_tech("Next.js")),
+                    ("DocumentaciÃ³n tÃ©cnica", signals["documentation"]),
                 ),
             ),
         ]

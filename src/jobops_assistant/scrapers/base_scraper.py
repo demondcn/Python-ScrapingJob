@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Iterable
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 import re
@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup, Tag
 from dateutil import parser as date_parser
 import requests
 
+from ..date_utils import parse_relative_posted_text
 from ..models import JobSearchSource
 from ..settings import Settings
 
@@ -49,6 +50,16 @@ class ScrapedJob:
     source_id: int | None = None
 
 
+@dataclass(slots=True)
+class ResponseDebugSnapshot:
+    requested_url: str
+    status_code: int | None
+    final_url: str
+    content_type: str
+    html: str
+    block_reason: str = ""
+
+
 class ScraperError(RuntimeError):
     pass
 
@@ -74,6 +85,7 @@ class BaseJobScraper:
     def __init__(self, settings: Settings, session: requests.Session | None = None) -> None:
         self.settings = settings
         self.session = session or requests.Session()
+        self.last_response_debug: ResponseDebugSnapshot | None = None
         self.session.headers.update(
             {
                 "User-Agent": settings.scraper_user_agent,
@@ -133,18 +145,29 @@ class BaseJobScraper:
         except requests.RequestException as exc:
             raise ScraperError(f"{self.portal_name}: error de red al consultar {url}: {exc}") from exc
 
+        text = response.text
+        self.last_response_debug = ResponseDebugSnapshot(
+            requested_url=url,
+            status_code=response.status_code,
+            final_url=self._clean_text(getattr(response, "url", "") or url),
+            content_type=self._clean_text(getattr(response, "headers", {}).get("Content-Type", "")),
+            html=text,
+        )
         if response.status_code == 403:
+            self._set_block_reason("status 403")
             raise SourceBlockedError(self.blocked_error_message)
         if response.status_code == 429:
+            self._set_block_reason("status 429")
             raise SourceBlockedError(f"{self.portal_name}: el portal devolvio 429. Se omite esta fuente.")
         response.raise_for_status()
-        text = response.text
         self._detect_blocked_content(text)
         return text
 
     def _detect_blocked_content(self, html: str) -> None:
-        normalized = self._normalize_text(html)
-        if "captcha" in normalized or "robot check" in normalized:
+        soup = self._soup(html)
+        normalized = self._normalize_text(soup.get_text(" ", strip=True))
+        html_normalized = self._normalize_text(html)
+        if self._has_strong_block_signal(soup, normalized, html_normalized):
             raise CaptchaRequiredError(self.captcha_error_message)
         if any(
             token in normalized
@@ -156,7 +179,55 @@ class BaseJobScraper:
                 "accede con tu cuenta",
             )
         ):
+            self._set_block_reason("login requerido detectado en el contenido")
             raise LoginRequiredError(self.login_error_message)
+
+    def _has_strong_block_signal(self, soup: BeautifulSoup, visible_text: str, html_text: str) -> bool:
+        text_signals = {
+            "verifica que no eres un robot": "texto visible de captcha",
+            "verify you are human": "texto visible de captcha",
+            "access denied": "access denied visible",
+            "forbidden": "forbidden visible",
+            "attention required": "cloudflare challenge visible",
+            "enable javascript and cookies to continue": "cloudflare challenge visible",
+        }
+        for token, reason in text_signals.items():
+            if token in visible_text:
+                self._set_block_reason(reason)
+                return True
+
+        strong_selectors = {
+            "iframe[src*='recaptcha']": "iframe recaptcha visible",
+            ".g-recaptcha": "widget recaptcha visible",
+            ".cf-turnstile": "turnstile visible",
+            "iframe[src*='turnstile']": "turnstile visible",
+            "form[action*='captcha']": "formulario captcha visible",
+            "input[name*='captcha']": "input captcha visible",
+            "#cf-challenge-running": "cloudflare challenge visible",
+            "#challenge-running": "challenge visible",
+        }
+        for selector, reason in strong_selectors.items():
+            if soup.select_one(selector):
+                if self.has_public_job_content(html_text):
+                    continue
+                self._set_block_reason(reason)
+                return True
+
+        if "cf-browser-verification" in html_text or "cf-chl-" in html_text:
+            if not self.has_public_job_content(html_text):
+                self._set_block_reason("cloudflare challenge embebido")
+                return True
+        return False
+
+    def has_public_job_content(self, html: str) -> bool:
+        return False
+
+    def _set_block_reason(self, reason: str) -> None:
+        if self.last_response_debug is not None:
+            self.last_response_debug.block_reason = reason
+
+    def get_last_debug_snapshot(self) -> ResponseDebugSnapshot | None:
+        return self.last_response_debug
 
     def _soup(self, html: str) -> BeautifulSoup:
         return BeautifulSoup(html, "lxml")
@@ -203,23 +274,9 @@ class BaseJobScraper:
         if not text:
             return None
 
-        now = datetime.now(UTC)
-        if any(token in text for token in ("hoy", "today", "just posted", "new", "recien", "recién publicada", "publicada hoy")):
-            return now
-        if "ayer" in text or "yesterday" in text:
-            return now - timedelta(days=1)
-
-        relative_patterns = (
-            (r"(?:hace|ago)\s+(\d+)\s+(?:hora|horas|hour|hours)", "hours"),
-            (r"(?:hace|ago)\s+(\d+)\s+(?:minuto|minutos|minute|minutes)", "minutes"),
-            (r"(?:hace|ago)\s+(\d+)\s+(?:dia|dias|día|días|day|days)", "days"),
-        )
-        for pattern, unit in relative_patterns:
-            match = re.search(pattern, text)
-            if not match:
-                continue
-            value = int(match.group(1))
-            return now - timedelta(**{unit: value})
+        relative_parsed = parse_relative_posted_text(raw_value, now=datetime.now(UTC))
+        if relative_parsed is not None:
+            return relative_parsed
 
         try:
             parsed = date_parser.parse(raw_value, fuzzy=True, dayfirst=True)
@@ -284,3 +341,6 @@ class SelectorBasedScraper(BaseJobScraper):
             if matches:
                 return [match for match in matches if isinstance(match, Tag)]
         return []
+
+    def has_public_job_content(self, html: str) -> bool:
+        return bool(self._select_cards(self._soup(html)))

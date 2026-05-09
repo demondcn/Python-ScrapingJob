@@ -1,0 +1,8 @@
+requested_url: https://www.magneto365.com/co/trabajos/buscar/junior-devops
+status_code: 200
+final_url: https://www.magneto365.com/co/trabajos/buscar/junior-devops
+content_type: text/html; charset=utf-8
+html_size: 672500
+block_reason: none
+html_preview:
+<!DOCTYPE html><html lang="es-CO" class="__className_ce61b5"><head><meta charSet="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><link rel="preload" as="image" href="https://static.magneto365.com/lib/assets/2.88.3/6db655a0b81727ca.svg"/><link rel="preload" as="image" href="https://static.magneto365.com/lib/assets/2.88.3/1d3675fa8f839315.svg"/><link rel="preload" as="image" href="https://static.magneto365.com/lib/assets/2.88.3/1d2b2fdbb7ac3a22.svg"/><link rel="preloa

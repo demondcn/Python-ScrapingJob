@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from .job_service import mark_offer_telegram_notified
 from .gmail_reader import read_recent_job_alerts
 from .job_service import create_offer, list_offers, refresh_offer_match
 from .profile_service import get_profile
@@ -34,12 +35,13 @@ def run_daily_scan(session: Session, settings: Settings) -> list[str]:
         if offer.compatibility_score >= settings.match_threshold:
             try:
                 sent, message = send_job_alert(settings, offer)
+                mark_offer_telegram_notified(session, offer, notified=sent)
                 register_notification(session, offer, "telegram", "sent" if sent else "skipped", message)
                 logs.append(message)
             except Exception as exc:  # pragma: no cover
                 message = f"Error enviando Telegram: {exc}"
+                mark_offer_telegram_notified(session, offer, notified=False)
                 register_notification(session, offer, "telegram", "error", message)
                 logs.append(message)
     logs.append(f"Ofertas totales registradas: {len(list_offers(session))}")
     return logs
-

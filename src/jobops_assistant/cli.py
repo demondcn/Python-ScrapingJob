@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import time
 
@@ -9,12 +10,24 @@ from sqlalchemy.orm import Session
 from .ats_resume_builder import build_ats_filename, build_ats_resume, get_available_targets
 from .cv_generator import generate_cv, register_generated_cv
 from .database import create_session_factory, create_sqlite_engine, init_db
-from .freshness_monitor import run_fresh_monitor
+from .discarded_job_service import (
+    count_discarded_jobs,
+    clear_discarded_jobs,
+    export_discarded_jobs,
+    get_discarded_job_by_id,
+    list_discarded_jobs,
+    parse_text_list,
+    reprocess_discarded_jobs,
+    short_discard_reason,
+)
+from .freshness_monitor import retry_pending_alerts, run_fresh_monitor
 from .job_service import (
+    clear_offers,
     create_offer,
     get_offer_by_id,
     list_fresh_offers,
     list_offers,
+    list_pending_alert_offers,
     refresh_offer_match,
     update_offer_notes,
     update_offer_status,
@@ -24,10 +37,23 @@ from .profile_service import get_profile, upsert_profile
 from .resume_profile_service import DEFAULT_RESUME_PROFILE_PATH, load_resume_profile, save_resume_profile
 from .resume_reader import read_resume_file
 from .scrapers.registry import list_supported_portals
-from .search_sources import add_source, get_source_by_id, list_sources, set_source_enabled, test_source
+from .search_sources import (
+    add_source,
+    disable_blocked_sources,
+    get_source_by_id,
+    list_sources,
+    set_source_enabled,
+    test_source,
+    unpause_source_by_id,
+    unpause_sources_by_portal,
+    update_portal_source_intervals,
+    update_source_interval,
+)
 from .settings import load_settings
 from .telegram_notifier import format_job_alert, send_job_alert
 from .workflows import run_daily_scan
+
+DEFAULT_DISCARDED_LIST_LIMIT = 20
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -97,6 +123,51 @@ def build_parser() -> argparse.ArgumentParser:
     offer_cv.add_argument("--id", required=True, type=int)
     offer_cv.set_defaults(handler=_handle_offer_cv)
 
+    offer_clear = offer_sub.add_parser("clear", help="Borra ofertas guardadas y hashes vistos")
+    offer_clear.add_argument("--portal")
+    offer_clear.add_argument("--yes", action="store_true")
+    offer_clear.set_defaults(handler=_handle_offer_clear)
+
+    offer_pending = offer_sub.add_parser("pending-alerts", help="Lista ofertas pendientes de alerta por Telegram")
+    offer_pending.add_argument("--portal")
+    offer_pending.set_defaults(handler=_handle_offer_pending_alerts)
+
+    discarded_parser = subparsers.add_parser("discarded", help="Audita ofertas descartadas")
+    discarded_sub = discarded_parser.add_subparsers(dest="discarded_command", required=True)
+
+    discarded_list = discarded_sub.add_parser("list", help="Lista ofertas descartadas")
+    discarded_list.add_argument("--portal")
+    discarded_list.add_argument("--target-role")
+    discarded_list.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_DISCARDED_LIST_LIMIT,
+        help=f"Maximo de resultados a mostrar (default: {DEFAULT_DISCARDED_LIST_LIMIT})",
+    )
+    discarded_list.set_defaults(handler=_handle_discarded_list)
+
+    discarded_show = discarded_sub.add_parser("show", help="Muestra el detalle de una descartada")
+    discarded_show.add_argument("--id", required=True, type=int)
+    discarded_show.set_defaults(handler=_handle_discarded_show)
+
+    discarded_clear = discarded_sub.add_parser("clear", help="Borra ofertas descartadas")
+    discarded_clear.add_argument("--portal")
+    discarded_clear.add_argument("--target-role")
+    discarded_clear.add_argument("--yes", action="store_true")
+    discarded_clear.set_defaults(handler=_handle_discarded_clear)
+
+    discarded_reprocess = discarded_sub.add_parser("reprocess", help="Reprocesa ofertas descartadas con el matcher actual")
+    discarded_reprocess.add_argument("--id", type=int)
+    discarded_reprocess.add_argument("--portal")
+    discarded_reprocess.add_argument("--target-role")
+    discarded_reprocess.set_defaults(handler=_handle_discarded_reprocess)
+
+    discarded_export = discarded_sub.add_parser("export", help="Exporta ofertas descartadas a CSV o JSON")
+    discarded_export.add_argument("--file", required=True)
+    discarded_export.add_argument("--portal")
+    discarded_export.add_argument("--target-role")
+    discarded_export.set_defaults(handler=_handle_discarded_export)
+
     sources_parser = subparsers.add_parser("sources", help="Gestiona fuentes de scraping responsable")
     sources_sub = sources_parser.add_subparsers(dest="sources_command", required=True)
 
@@ -122,12 +193,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     sources_test = sources_sub.add_parser("test", help="Prueba una fuente sin guardar resultados")
     sources_test.add_argument("--id", required=True, type=int)
+    sources_test.add_argument("--debug-html", action="store_true")
+    sources_test.add_argument("--show-discarded", action="store_true")
     sources_test.set_defaults(handler=_handle_sources_test)
+
+    sources_update_interval = sources_sub.add_parser("update-interval", help="Actualiza el intervalo de una fuente o portal")
+    sources_update_interval.add_argument("--id", type=int)
+    sources_update_interval.add_argument("--portal")
+    sources_update_interval.add_argument("--interval", required=True, type=int)
+    sources_update_interval.set_defaults(handler=_handle_sources_update_interval)
+
+    sources_unpause = sources_sub.add_parser("unpause", help="Reanuda una fuente pausada o un portal completo")
+    sources_unpause.add_argument("--id", type=int)
+    sources_unpause.add_argument("--portal")
+    sources_unpause.set_defaults(handler=_handle_sources_unpause)
+
+    sources_disable_blocked = sources_sub.add_parser("disable-blocked", help="Desactiva fuentes con bloqueos repetidos")
+    sources_disable_blocked.set_defaults(handler=_handle_sources_disable_blocked)
 
     monitor_parser = subparsers.add_parser("monitor", help="Monitorea ofertas frescas")
     monitor_sub = monitor_parser.add_subparsers(dest="monitor_command", required=True)
 
     monitor_fresh = monitor_sub.add_parser("fresh", help="Ejecuta el monitor una vez")
+    monitor_fresh.add_argument("--notify-pending", action="store_true")
     monitor_fresh.set_defaults(handler=_handle_monitor_fresh)
 
     monitor_watch = monitor_sub.add_parser("watch", help="Ejecuta el monitor en bucle")
@@ -139,6 +227,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     summary_parser = subparsers.add_parser("send-summary", help="Envia resumen de la oferta mas relevante")
     summary_parser.set_defaults(handler=_handle_send_summary)
+
+    notifications_parser = subparsers.add_parser("notifications", help="Gestiona reintentos de notificaciones")
+    notifications_sub = notifications_parser.add_subparsers(dest="notifications_command", required=True)
+    notifications_retry = notifications_sub.add_parser("retry-pending", help="Reintenta ofertas pendientes de alerta")
+    notifications_retry.add_argument("--portal")
+    notifications_retry.set_defaults(handler=_handle_notifications_retry_pending)
 
     resume_parser = subparsers.add_parser("resume", help="Gestiona la hoja de vida base y CV ATS")
     resume_sub = resume_parser.add_subparsers(dest="resume_command", required=True)
@@ -275,6 +369,8 @@ def _handle_offer_show(args, session: Session, settings, session_factory) -> int
         "url",
         "status",
         "compatibility_score",
+        "telegram_notified",
+        "telegram_notified_at",
         "published_at",
         "found_at",
         "source_id",
@@ -333,6 +429,175 @@ def _handle_offer_cv(args, session: Session, settings, session_factory) -> int:
     return 0
 
 
+def _handle_offer_clear(args, session: Session, settings, session_factory) -> int:
+    if not args.yes:
+        try:
+            confirmation = input(
+                "Esto borrará ofertas, hashes vistos y notificaciones relacionadas. ¿Continuar? (yes/no) "
+            ).strip()
+        except EOFError:
+            print("Operacion cancelada: se requiere confirmacion interactiva o usar --yes.")
+            return 1
+        if confirmation.lower() != "yes":
+            print("Operacion cancelada.")
+            return 1
+
+    result = clear_offers(session, portal=args.portal)
+    print(f"Ofertas eliminadas: {result['offers_deleted']}")
+    print(f"Hashes eliminados: {result['hashes_deleted']}")
+    print(f"Notificaciones eliminadas: {result['notifications_deleted']}")
+    print(f"Documentos relacionados eliminados: {result['documents_deleted']}")
+    print("Fuentes conservadas: job_search_sources")
+    return 0
+
+
+def _handle_offer_pending_alerts(args, session: Session, settings, session_factory) -> int:
+    offers = list_pending_alert_offers(session, threshold=settings.match_threshold, portal=args.portal)
+    if not offers:
+        print("No hay ofertas pendientes de alerta.")
+        return 0
+    for offer in offers:
+        print(
+            f"[{offer.id}] {offer.title} | {offer.company} | {offer.portal} | "
+            f"{offer.compatibility_score:.0f}% | {offer.url}"
+        )
+    return 0
+
+
+def _handle_discarded_list(args, session: Session, settings, session_factory) -> int:
+    limit = args.limit if args.limit and args.limit > 0 else DEFAULT_DISCARDED_LIST_LIMIT
+    total = count_discarded_jobs(
+        session,
+        portal=args.portal,
+        target_role=args.target_role,
+    )
+    records = list_discarded_jobs(
+        session,
+        portal=args.portal,
+        target_role=args.target_role,
+        limit=limit,
+    )
+    if not records:
+        print("No hay ofertas descartadas registradas.")
+        return 0
+    shown = len(records)
+    if total > shown:
+        print(
+            f"Mostrando {shown} de {total} descartadas. Usa --limit para ampliar el listado."
+        )
+    else:
+        print(f"Mostrando {shown} descartadas.")
+    for record in records:
+        print(
+            f"[{record.id}] {record.title} | {record.company} | {record.portal} | "
+            f"{record.target_role} | {short_discard_reason(record)} | {record.normalized_url or record.url}"
+        )
+    return 0
+
+
+def _handle_discarded_show(args, session: Session, settings, session_factory) -> int:
+    record = get_discarded_job_by_id(session, args.id)
+    if record is None:
+        print("Oferta descartada no encontrada.")
+        return 1
+    for key in (
+        "id",
+        "title",
+        "company",
+        "portal",
+        "target_role",
+        "location",
+        "modality",
+        "salary",
+        "url",
+        "source_url",
+        "found_at",
+        "seen_count",
+        "last_seen_at",
+        "compatibility_score",
+        "source_id",
+    ):
+        print(f"{key}: {getattr(record, key)}")
+    print("discard_reasons:")
+    print(_format_json_text_list(record.discard_reasons))
+    print("detected_keywords:")
+    print(_format_json_text_list(record.detected_keywords))
+    print("description:")
+    print(record.description)
+    print("requirements:")
+    print(record.requirements)
+    print("raw_posted_text:")
+    print(record.raw_posted_text)
+    return 0
+
+
+def _handle_discarded_clear(args, session: Session, settings, session_factory) -> int:
+    if not args.yes:
+        try:
+            confirmation = input(
+                "Esto borrara solo ofertas descartadas. Continuar? (yes/no) "
+            ).strip()
+        except EOFError:
+            print("Operacion cancelada: se requiere confirmacion interactiva o usar --yes.")
+            return 1
+        if confirmation.lower() != "yes":
+            print("Operacion cancelada.")
+            return 1
+    deleted = clear_discarded_jobs(session, portal=args.portal, target_role=args.target_role)
+    print(f"Descartadas eliminadas: {deleted}")
+    print("Ofertas reales conservadas: job_offers")
+    print("Fuentes conservadas: job_search_sources")
+    return 0
+
+
+def _handle_discarded_reprocess(args, session: Session, settings, session_factory) -> int:
+    if args.id is None and not args.portal and not args.target_role:
+        print("Debes indicar al menos una opcion: --id, --portal o --target-role.")
+        return 1
+    profile = get_profile(session)
+    results = reprocess_discarded_jobs(
+        session,
+        create_offer=create_offer,
+        refresh_offer_match=refresh_offer_match,
+        profile=profile,
+        discarded_job_id=args.id,
+        portal=args.portal,
+        target_role=args.target_role,
+    )
+    if not results:
+        print("No se encontraron ofertas descartadas para reprocesar.")
+        return 0
+    accepted = 0
+    still_discarded = 0
+    for item in results:
+        if item.accepted:
+            accepted += 1
+            print(f"[{item.discarded_job_id}] aceptada -> job_offer {item.offer_id} | {item.title}")
+        else:
+            still_discarded += 1
+            reason_text = "; ".join(item.reasons) if item.reasons else "sin razon registrada"
+            print(f"[{item.discarded_job_id}] sigue descartada | {item.title} | {reason_text}")
+    print(f"Reprocesadas: {len(results)} | aceptadas: {accepted} | descartadas: {still_discarded}")
+    return 0
+
+
+def _handle_discarded_export(args, session: Session, settings, session_factory) -> int:
+    file_path = Path(args.file)
+    try:
+        exported = export_discarded_jobs(
+            session,
+            file_path=file_path,
+            portal=args.portal,
+            target_role=args.target_role,
+        )
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+    print(f"Descartadas exportadas: {exported}")
+    print(f"Archivo: {file_path}")
+    return 0
+
+
 def _handle_sources_add(args, session: Session, settings, session_factory) -> int:
     portal = args.portal.strip().lower()
     if portal not in list_supported_portals():
@@ -369,7 +634,8 @@ def _handle_sources_list(args, session: Session, settings, session_factory) -> i
     for source in sources:
         print(
             f"[{source.id}] {source.portal} | target={source.target_role} | enabled={source.enabled} | "
-            f"interval={source.interval_minutes}m | last_checked={source.last_checked_at} | url={source.search_url}"
+            f"interval={source.interval_minutes}m | failure_count={source.failure_count} | "
+            f"paused_until={source.paused_until} | last_checked={source.last_checked_at} | url={source.search_url}"
         )
         if source.last_error:
             print(f"    ultimo_error: {source.last_error}")
@@ -400,6 +666,10 @@ def _handle_sources_test(args, session: Session, settings, session_factory) -> i
         print("Fuente no encontrada.")
         return 1
     result = test_source(settings, source)
+    if args.debug_html:
+        html_path, meta_path = _write_source_debug_files(source, result)
+        print(f"Debug HTML: {html_path}")
+        print(f"Debug meta: {meta_path}")
     print(f"Portal: {source.portal}")
     print(f"URL: {source.search_url}")
     if result.error:
@@ -411,11 +681,119 @@ def _handle_sources_test(args, session: Session, settings, session_factory) -> i
         preview = (item.description or item.requirements or "").replace("\n", " ").strip()
         if preview:
             print(f"  descripcion: {preview[:180]}")
+    if args.show_discarded and result.discarded:
+        print(f"Ofertas descartadas: {len(result.discarded)}")
+        for discarded in result.discarded[:5]:
+            reason_text = "; ".join(discarded.reasons) if discarded.reasons else "sin razon registrada"
+            keywords_text = ", ".join(discarded.detected_keywords) if discarded.detected_keywords else "sin keywords"
+            score_text = discarded.preliminary_score if discarded.preliminary_score is not None else "n/a"
+            print(
+                f"- {discarded.job.title} | {discarded.job.company} | target={source.target_role} | "
+                f"razones={reason_text} | keywords={keywords_text} | score={score_text} | "
+                f"url={discarded.job.url}"
+            )
+    return 0
+
+
+def _write_source_debug_files(source, result):
+    debug_dir = Path("debug")
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    html_path = debug_dir / f"source_{source.id}_{source.portal}.html"
+    meta_path = debug_dir / f"source_{source.id}_{source.portal}_meta.txt"
+    snapshot = result.debug_snapshot
+    html_content = snapshot.html if snapshot is not None else ""
+    meta_lines = [
+        f"requested_url: {snapshot.requested_url if snapshot is not None else source.search_url}",
+        f"status_code: {snapshot.status_code if snapshot is not None else 'unknown'}",
+        f"final_url: {snapshot.final_url if snapshot is not None else source.search_url}",
+        f"content_type: {snapshot.content_type if snapshot is not None else 'unknown'}",
+        f"html_size: {len(html_content)}",
+        f"block_reason: {snapshot.block_reason if snapshot is not None and snapshot.block_reason else (result.error or 'none')}",
+        "html_preview:",
+        (html_content[:500] if html_content else ""),
+    ]
+    html_path.write_text(html_content, encoding="utf-8")
+    meta_path.write_text("\n".join(meta_lines), encoding="utf-8")
+    return html_path, meta_path
+
+
+def _format_json_text_list(raw_value: str) -> str:
+    values = parse_text_list(raw_value)
+    if not values:
+        return "[]"
+    return json.dumps(values, ensure_ascii=False, indent=2)
+
+
+def _handle_sources_update_interval(args, session: Session, settings, session_factory) -> int:
+    if bool(args.id) == bool(args.portal):
+        print("Debes indicar exactamente una opcion: --id o --portal.")
+        return 1
+    try:
+        if args.id:
+            source = update_source_interval(
+                session,
+                args.id,
+                interval_minutes=args.interval,
+                min_interval_minutes=settings.min_monitor_interval_minutes,
+            )
+            if source is None:
+                print("Fuente no encontrada.")
+                return 1
+            print(f"Fuente {source.id} actualizada a intervalo {source.interval_minutes} minutos.")
+            return 0
+
+        sources = update_portal_source_intervals(
+            session,
+            args.portal,
+            interval_minutes=args.interval,
+            min_interval_minutes=settings.min_monitor_interval_minutes,
+            enabled_only=True,
+        )
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+
+    if not sources:
+        print(f"No se encontraron fuentes activas para el portal {args.portal.strip().lower()}.")
+        return 1
+    print(
+        f"Fuentes de {args.portal.strip().lower()} actualizadas a intervalo {args.interval} minutos: {len(sources)} fuentes."
+    )
+    return 0
+
+
+def _handle_sources_unpause(args, session: Session, settings, session_factory) -> int:
+    if bool(args.id) == bool(args.portal):
+        print("Debes indicar exactamente una opcion: --id o --portal.")
+        return 1
+
+    if args.id:
+        source = unpause_source_by_id(session, args.id)
+        if source is None:
+            print("Fuente no encontrada.")
+            return 1
+        print(f"Fuente {source.id} reanudada.")
+        return 0
+
+    sources = unpause_sources_by_portal(session, args.portal)
+    if not sources:
+        print(f"No se encontraron fuentes para el portal {args.portal.strip().lower()}.")
+        return 1
+    print(f"Fuentes de {args.portal.strip().lower()} reanudadas: {len(sources)} fuentes.")
+    return 0
+
+
+def _handle_sources_disable_blocked(args, session: Session, settings, session_factory) -> int:
+    sources = disable_blocked_sources(session)
+    if not sources:
+        print("No hay fuentes bloqueadas para desactivar.")
+        return 0
+    print(f"Fuentes bloqueadas desactivadas: {len(sources)}")
     return 0
 
 
 def _handle_monitor_fresh(args, session: Session, settings, session_factory) -> int:
-    for line in run_fresh_monitor(session, settings, force_all=True):
+    for line in run_fresh_monitor(session, settings, force_all=True, notify_pending=args.notify_pending):
         print(line)
     return 0
 
@@ -430,7 +808,7 @@ def _handle_monitor_watch(args, session: Session, settings, session_factory) -> 
     try:
         while True:
             with session_factory() as watch_session:
-                for line in run_fresh_monitor(watch_session, settings, force_all=False):
+                for line in run_fresh_monitor(watch_session, settings, force_all=False, notify_pending=True):
                     print(line)
             time.sleep(args.interval * 60)
     except KeyboardInterrupt:
@@ -459,6 +837,13 @@ def _handle_send_summary(args, session: Session, settings, session_factory) -> i
         print(f"No se pudo enviar el resumen: {exc}")
         print(format_job_alert(top))
         return 1
+    return 0
+
+
+def _handle_notifications_retry_pending(args, session: Session, settings, session_factory) -> int:
+    logs = retry_pending_alerts(session, settings, portal=args.portal)
+    for line in logs:
+        print(line)
     return 0
 
 

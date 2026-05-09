@@ -1,0 +1,8 @@
+requested_url: https://co.indeed.com/jobs?q=junior%20fullstack%20developer&l=Bogot%C3%A1%20D.C.%2C%20Cundinamarca&from=searchOnHP
+status_code: 403
+final_url: https://co.indeed.com/jobs?q=junior%20fullstack%20developer&l=Bogot%C3%A1%20D.C.%2C%20Cundinamarca&from=searchOnHP
+content_type: text/html; charset=UTF-8
+html_size: 59591
+block_reason: status 403
+html_preview:
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Security Check - Indeed.com</title><style>:root{--lightningcss-light:initial;--lightningcss-dark: ;--lightningcss-light:initial;--lightningcss-dark: ;color-scheme:light dark;--background-color:#fff;--primary-1000:#0d2d5e;--primary-900:#164081;--primary-800:#2557a7;--primary-700:#3f73d3;--primary-600:#6792f0;--neutral-1000:#2d2d2d;--neutral-900:#424242;--neutral-

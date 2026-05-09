@@ -19,8 +19,11 @@ class Settings:
     scraper_user_agent: str
     max_results_per_source: int
     min_monitor_interval_minutes: int
+    telegram_digest_max_jobs: int
+    telegram_max_message_chars: int
     templates_dir: Path
     generated_dir: Path
+    timezone_name: str = "America/Bogota"
 
 
 def load_settings() -> Settings:
@@ -42,6 +45,9 @@ def load_settings() -> Settings:
         ).strip(),
         max_results_per_source=int(os.getenv("JOBOPS_MAX_RESULTS_PER_SOURCE", "25")),
         min_monitor_interval_minutes=int(os.getenv("JOBOPS_MIN_MONITOR_INTERVAL_MINUTES", "10")),
+        telegram_digest_max_jobs=int(os.getenv("JOBOPS_TELEGRAM_DIGEST_MAX_JOBS", "10")),
+        telegram_max_message_chars=int(os.getenv("JOBOPS_TELEGRAM_MAX_MESSAGE_CHARS", "3500")),
         templates_dir=templates_dir,
         generated_dir=generated_dir,
+        timezone_name=os.getenv("JOBOPS_TIMEZONE", "America/Bogota").strip() or "America/Bogota",
     )

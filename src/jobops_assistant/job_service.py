@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .matcher import calculate_match
-from .models import CandidateProfile, JobOffer
+from .models import CandidateProfile, GeneratedDocument, JobOffer, JobSeenHash, Notification
 
 
 def create_offer(
@@ -126,6 +126,25 @@ def list_fresh_offers(session: Session, *, portal: str | None = None, hours: int
     return list(session.scalars(stmt))
 
 
+def list_pending_alert_offers(
+    session: Session,
+    *,
+    threshold: int,
+    portal: str | None = None,
+    source_id: int | None = None,
+) -> list[JobOffer]:
+    stmt = select(JobOffer).where(
+        JobOffer.telegram_notified.is_(False),
+        JobOffer.compatibility_score >= threshold,
+    )
+    if portal:
+        stmt = stmt.where(func.lower(JobOffer.portal) == portal.lower())
+    if source_id is not None:
+        stmt = stmt.where(JobOffer.source_id == source_id)
+    stmt = stmt.order_by(JobOffer.compatibility_score.desc(), func.coalesce(JobOffer.found_at, JobOffer.created_at).desc())
+    return list(session.scalars(stmt))
+
+
 def get_offer_by_id(session: Session, offer_id: int) -> JobOffer | None:
     return session.get(JobOffer, offer_id)
 
@@ -168,6 +187,20 @@ def update_offer_notes(session: Session, offer_id: int, notes: str) -> JobOffer 
     return offer
 
 
+def mark_offer_telegram_notified(
+    session: Session,
+    offer: JobOffer,
+    *,
+    notified: bool,
+    notified_at: datetime | None = None,
+) -> JobOffer:
+    offer.telegram_notified = notified
+    offer.telegram_notified_at = (notified_at or datetime.now(UTC)) if notified else None
+    session.commit()
+    session.refresh(offer)
+    return offer
+
+
 def refresh_offer_match(session: Session, offer: JobOffer, profile: CandidateProfile | None) -> JobOffer:
     match = calculate_match(profile, offer)
     offer.compatibility_score = match.score
@@ -175,6 +208,46 @@ def refresh_offer_match(session: Session, offer: JobOffer, profile: CandidatePro
     session.commit()
     session.refresh(offer)
     return offer
+
+
+def clear_offers(session: Session, *, portal: str | None = None) -> dict[str, int | str]:
+    offer_ids = [
+        offer_id
+        for (offer_id,) in session.execute(
+            select(JobOffer.id).where(func.lower(JobOffer.portal) == portal.lower()) if portal else select(JobOffer.id)
+        )
+    ]
+    deleted_documents = 0
+    deleted_notifications = 0
+    deleted_offers = 0
+    deleted_hashes = 0
+
+    if offer_ids:
+        deleted_documents = session.execute(
+            delete(GeneratedDocument).where(GeneratedDocument.job_offer_id.in_(offer_ids))
+        ).rowcount or 0
+        deleted_notifications = session.execute(
+            delete(Notification).where(Notification.job_offer_id.in_(offer_ids))
+        ).rowcount or 0
+        deleted_offers = session.execute(
+            delete(JobOffer).where(JobOffer.id.in_(offer_ids))
+        ).rowcount or 0
+
+    if portal:
+        deleted_hashes = session.execute(
+            delete(JobSeenHash).where(func.lower(JobSeenHash.portal) == portal.lower())
+        ).rowcount or 0
+    else:
+        deleted_hashes = session.execute(delete(JobSeenHash)).rowcount or 0
+
+    session.commit()
+    return {
+        "portal": portal or "all",
+        "offers_deleted": deleted_offers,
+        "hashes_deleted": deleted_hashes,
+        "notifications_deleted": deleted_notifications,
+        "documents_deleted": deleted_documents,
+    }
 
 
 def _merge_offer_fields(

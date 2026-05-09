@@ -206,6 +206,10 @@ def test_build_ats_resume_creates_all_targets_without_noise(tmp_path: Path):
             assert fragment not in joined
 
 
+def test_get_available_targets_includes_frontend_junior():
+    assert "frontend_junior" in get_available_targets()
+
+
 def test_build_ats_resume_with_job_offer_uses_clean_builder(tmp_path: Path):
     output = tmp_path / "job.docx"
     offer = JobOffer(

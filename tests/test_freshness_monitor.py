@@ -4,8 +4,8 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from src.jobops_assistant.database import create_session_factory, create_sqlite_engine, init_db
-from src.jobops_assistant.freshness_monitor import is_scraped_job_fresh, run_fresh_monitor
-from src.jobops_assistant.job_service import list_offers
+from src.jobops_assistant.freshness_monitor import is_scraped_job_fresh, retry_pending_alerts, run_fresh_monitor
+from src.jobops_assistant.job_service import list_offers, list_pending_alert_offers
 from src.jobops_assistant.models import JobOffer
 from src.jobops_assistant.profile_service import upsert_profile
 from src.jobops_assistant.scrapers.base_scraper import ScrapedJob, SourceBlockedError
@@ -25,6 +25,8 @@ def _settings(tmp_path: Path) -> Settings:
         scraper_user_agent="JobOps Test Agent",
         max_results_per_source=25,
         min_monitor_interval_minutes=10,
+        telegram_digest_max_jobs=10,
+        telegram_max_message_chars=3500,
         templates_dir=tmp_path / "templates",
         generated_dir=tmp_path / "generated",
     )
@@ -46,7 +48,7 @@ def test_monitor_saves_new_offers_dedupes_and_notifies_once(tmp_path: Path, monk
     engine = create_sqlite_engine(settings.db_path)
     init_db(engine)
     session_factory = create_session_factory(engine)
-    calls: list[tuple[int, str | None]] = []
+    calls: list[list[int]] = []
 
     with Session(session_factory.kw["bind"]) as session:
         upsert_profile(
@@ -90,8 +92,8 @@ def test_monitor_saves_new_offers_dedupes_and_notifies_once(tmp_path: Path, monk
             lambda portal, settings: _FakeScraper([job]),
         )
         monkeypatch.setattr(
-            "src.jobops_assistant.freshness_monitor.send_job_alert",
-            lambda settings, offer, target_role=None: calls.append((offer.id, target_role)) or (True, "Alerta enviada por Telegram."),
+            "src.jobops_assistant.freshness_monitor.send_job_alert_digest",
+            lambda offers, settings, title=None: calls.append([offer.id for offer in offers]) or (True, "Digest enviado por Telegram con 1 ofertas.", offers),
         )
 
         first_logs = run_fresh_monitor(session, settings, force_all=True)
@@ -100,9 +102,11 @@ def test_monitor_saves_new_offers_dedupes_and_notifies_once(tmp_path: Path, monk
         offers = list_offers(session)
         assert len(offers) == 1
         assert offers[0].title == "Soporte de Aplicaciones Junior"
-        assert calls == [(offers[0].id, "soporte_aplicaciones")]
+        assert calls == [[offers[0].id]]
+        assert offers[0].telegram_notified is True
         assert any("nuevas=1" in line for line in first_logs)
         assert any("duplicados=1" in line for line in second_logs)
+        assert any("digest enviado con 1 ofertas" in line for line in first_logs)
 
 
 def test_monitor_continues_if_one_portal_fails(tmp_path: Path, monkeypatch):
@@ -151,8 +155,8 @@ def test_monitor_continues_if_one_portal_fails(tmp_path: Path, monkeypatch):
 
         monkeypatch.setattr("src.jobops_assistant.freshness_monitor.get_scraper", fake_get_scraper)
         monkeypatch.setattr(
-            "src.jobops_assistant.freshness_monitor.send_job_alert",
-            lambda settings, offer, target_role=None: (True, "Alerta enviada por Telegram."),
+            "src.jobops_assistant.freshness_monitor.send_job_alert_digest",
+            lambda offers, settings, title=None: (True, "Digest enviado por Telegram con 1 ofertas.", offers),
         )
 
         logs = run_fresh_monitor(session, settings, force_all=True)
@@ -165,7 +169,95 @@ def test_monitor_continues_if_one_portal_fails(tmp_path: Path, monkeypatch):
         assert any("linkedin" in line.lower() and "error" in line.lower() for line in logs)
         assert any("torre" in line.lower() and "nuevas=1" in line.lower() for line in logs)
         assert failed_source is not None and "LinkedIn no permitió leer resultados públicos" in failed_source.last_error
+        assert failed_source.failure_count == 1
         assert ok_source is not None and ok_source.last_error == ""
+
+
+def test_blocked_source_is_paused_after_three_failures_and_skipped(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+
+    with Session(engine) as session:
+        source = add_source(
+            session,
+            portal="elempleo",
+            target_role="backend_junior",
+            search_url="https://elempleo.example/jobs",
+            interval_minutes=15,
+            min_interval_minutes=settings.min_monitor_interval_minutes,
+        )
+
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.get_scraper",
+            lambda portal, settings: _FakeScraper(error=SourceBlockedError("La fuente solicito captcha. Se omite esta fuente.")),
+        )
+
+        run_fresh_monitor(session, settings, force_all=True)
+        run_fresh_monitor(session, settings, force_all=True)
+        third_logs = run_fresh_monitor(session, settings, force_all=True)
+        paused_source = get_source_by_id(session, source.id)
+
+        assert paused_source is not None
+        assert paused_source.failure_count == 3
+        assert paused_source.paused_until is not None
+        assert any("pausada hasta" in line.lower() for line in third_logs)
+
+        skipped_logs = run_fresh_monitor(session, settings, force_all=False)
+        assert any("pausada hasta" in line.lower() for line in skipped_logs)
+
+
+def test_successful_source_resets_failure_state(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+
+    with Session(engine) as session:
+        source = add_source(
+            session,
+            portal="computrabajo",
+            target_role="backend_junior",
+            search_url="https://computrabajo.example/jobs",
+            interval_minutes=15,
+            min_interval_minutes=settings.min_monitor_interval_minutes,
+        )
+        source.failure_count = 2
+        source.last_error = "captcha"
+        source.last_failed_at = datetime.now(UTC) - timedelta(hours=3)
+        session.commit()
+
+        job = ScrapedJob(
+            title="Backend Junior",
+            company="ABC Tecnologia",
+            portal="computrabajo",
+            location="Bogota",
+            modality="Remoto",
+            salary="",
+            url="https://computrabajo.example/jobs/401",
+            description="Node.js, APIs REST, SQL y Git.",
+            requirements="Junior",
+            published_at=datetime.now(UTC),
+            found_at=datetime.now(UTC),
+            raw_posted_text="Publicada hoy",
+            source_id=source.id,
+        )
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.get_scraper",
+            lambda portal, settings: _FakeScraper([job]),
+        )
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.send_job_alert_digest",
+            lambda offers, settings, title=None: (True, "Digest enviado por Telegram con 1 ofertas.", offers),
+        )
+
+        run_fresh_monitor(session, settings, force_all=True)
+        updated = get_source_by_id(session, source.id)
+
+        assert updated is not None
+        assert updated.failure_count == 0
+        assert updated.last_error == ""
+        assert updated.paused_until is None
+        assert updated.last_failed_at is None
 
 
 def test_monitor_calls_telegram_only_above_threshold(tmp_path: Path, monkeypatch):
@@ -173,7 +265,7 @@ def test_monitor_calls_telegram_only_above_threshold(tmp_path: Path, monkeypatch
     engine = create_sqlite_engine(settings.db_path)
     init_db(engine)
     session_factory = create_session_factory(engine)
-    calls: list[int] = []
+    calls: list[list[int]] = []
 
     with Session(session_factory.kw["bind"]) as session:
         add_source(
@@ -222,15 +314,522 @@ def test_monitor_calls_telegram_only_above_threshold(tmp_path: Path, monkeypatch
             lambda portal, settings: _FakeScraper(jobs),
         )
         monkeypatch.setattr(
-            "src.jobops_assistant.freshness_monitor.send_job_alert",
-            lambda settings, offer, target_role=None: calls.append(offer.id) or (True, "Alerta enviada por Telegram."),
+            "src.jobops_assistant.freshness_monitor.send_job_alert_digest",
+            lambda offers, settings, title=None: calls.append([offer.id for offer in offers]) or (True, "Digest enviado por Telegram con 1 ofertas.", offers),
+        )
+
+        logs = run_fresh_monitor(session, settings, force_all=True)
+
+        offers = list_offers(session)
+        assert len(offers) == 1
+        assert len(calls) == 1
+        assert len(calls[0]) == 1
+        assert any("descartadas=1" in line for line in logs)
+
+
+def test_monitor_groups_multiple_notifiable_offers_in_single_digest_call(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+    session_factory = create_session_factory(engine)
+    calls: list[list[int]] = []
+
+    with Session(session_factory.kw["bind"]) as session:
+        add_source(
+            session,
+            portal="computrabajo",
+            target_role="fullstack_junior",
+            search_url="https://computrabajo.example/jobs",
+            interval_minutes=15,
+            min_interval_minutes=settings.min_monitor_interval_minutes,
+        )
+        jobs = [
+            ScrapedJob(
+                title="Full Stack Junior",
+                company="ABC Tecnologia",
+                portal="computrabajo",
+                location="Bogota",
+                modality="Remoto",
+                salary="",
+                url="https://computrabajo.example/jobs/301",
+                description="React, Node.js, SQL, panel administrativo y APIs.",
+                requirements="Junior",
+                published_at=datetime.now(UTC),
+                found_at=datetime.now(UTC),
+                raw_posted_text="Publicada hoy",
+                source_id=1,
+            ),
+            ScrapedJob(
+                title="Desarrollador Full Stack",
+                company="UI Labs",
+                portal="computrabajo",
+                location="Bogota",
+                modality="Hibrido",
+                salary="",
+                url="https://computrabajo.example/jobs/302",
+                description="Next.js, Node.js, PostgreSQL y e-commerce.",
+                requirements="1 ano",
+                published_at=datetime.now(UTC),
+                found_at=datetime.now(UTC),
+                raw_posted_text="Publicada hoy",
+                source_id=1,
+            ),
+            ScrapedJob(
+                title="Full Stack Junior",
+                company="App Labs",
+                portal="computrabajo",
+                location="Bogota",
+                modality="Hibrido",
+                salary="",
+                url="https://computrabajo.example/jobs/303",
+                description="React, Node.js, PostgreSQL y despliegue.",
+                requirements="Junior",
+                published_at=datetime.now(UTC),
+                found_at=datetime.now(UTC),
+                raw_posted_text="Publicada hoy",
+                source_id=1,
+            ),
+        ]
+
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.get_scraper",
+            lambda portal, settings: _FakeScraper(jobs),
+        )
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.send_job_alert_digest",
+            lambda offers, settings, title=None: calls.append([offer.id for offer in offers]) or (True, "Digest enviado por Telegram con 3 ofertas.", offers),
+        )
+
+        logs = run_fresh_monitor(session, settings, force_all=True)
+
+        assert len(calls) == 1
+        assert len(calls[0]) == 3
+        assert any("queued_alerts=3" in line for line in logs)
+        assert any("digest enviado con 3 ofertas" in line for line in logs)
+
+
+def test_monitor_discards_noise_for_backend_target(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+
+    with Session(engine) as session:
+        add_source(
+            session,
+            portal="elempleo",
+            target_role="backend_junior",
+            search_url="https://elempleo.example/jobs",
+            interval_minutes=15,
+            min_interval_minutes=settings.min_monitor_interval_minutes,
+        )
+        jobs = [
+            ScrapedJob(
+                title="Backend Junior",
+                company="ABC",
+                portal="elempleo",
+                location="Bogota",
+                modality="Remoto",
+                salary="",
+                url="https://elempleo.example/jobs/1",
+                description="Node.js, SQL y APIs REST.",
+                requirements="Junior",
+                published_at=datetime.now(UTC),
+                found_at=datetime.now(UTC),
+                raw_posted_text="Hoy",
+                source_id=1,
+            ),
+            ScrapedJob(
+                title="Senior Backend Developer",
+                company="XYZ",
+                portal="elempleo",
+                location="Bogota",
+                modality="Remoto",
+                salary="",
+                url="https://elempleo.example/jobs/2",
+                description="Java, Spring Boot y microservicios.",
+                requirements="5 anos de experiencia",
+                published_at=datetime.now(UTC),
+                found_at=datetime.now(UTC),
+                raw_posted_text="Hoy",
+                source_id=1,
+            ),
+            ScrapedJob(
+                title="Disenador UX",
+                company="DesignCo",
+                portal="elempleo",
+                location="Bogota",
+                modality="Hibrido",
+                salary="",
+                url="https://elempleo.example/jobs/3",
+                description="UI, Figma y experiencia de usuario.",
+                requirements="Junior",
+                published_at=datetime.now(UTC),
+                found_at=datetime.now(UTC),
+                raw_posted_text="Hoy",
+                source_id=1,
+            ),
+        ]
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.get_scraper",
+            lambda portal, settings: _FakeScraper(jobs),
+        )
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.send_job_alert_digest",
+            lambda offers, settings, title=None: (True, "Digest enviado por Telegram con 1 ofertas.", offers),
+        )
+
+        logs = run_fresh_monitor(session, settings, force_all=True)
+        offers = list_offers(session)
+
+        assert len(offers) == 1
+        assert offers[0].title == "Backend Junior"
+        assert any("descartadas=2" in line for line in logs)
+
+
+def test_monitor_keeps_offers_pending_if_digest_fails(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+    session_factory = create_session_factory(engine)
+
+    with Session(session_factory.kw["bind"]) as session:
+        add_source(
+            session,
+            portal="computrabajo",
+            target_role="backend_junior",
+            search_url="https://computrabajo.example/jobs",
+            interval_minutes=15,
+            min_interval_minutes=settings.min_monitor_interval_minutes,
+        )
+        job = ScrapedJob(
+            title="Backend Junior",
+            company="ABC Tecnologia",
+            portal="computrabajo",
+            location="Bogota",
+            modality="Remoto",
+            salary="",
+            url="https://computrabajo.example/jobs/304",
+            description="Node.js, APIs REST, SQL y Git.",
+            requirements="Junior",
+            published_at=datetime.now(UTC),
+            found_at=datetime.now(UTC),
+            raw_posted_text="Publicada hoy",
+            source_id=1,
+        )
+
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.get_scraper",
+            lambda portal, settings: _FakeScraper([job]),
+        )
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.send_job_alert_digest",
+            lambda offers, settings, title=None: (False, "Error enviando digest por Telegram: fail", []),
         )
 
         run_fresh_monitor(session, settings, force_all=True)
 
-        offers = list_offers(session)
-        assert len(offers) == 2
+        offer = list_offers(session)[0]
+        assert offer.telegram_notified is False
+
+
+
+def test_monitor_retries_duplicate_offer_if_not_notified(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+    session_factory = create_session_factory(engine)
+    calls: list[list[int]] = []
+
+    with Session(session_factory.kw["bind"]) as session:
+        upsert_profile(
+            session,
+            full_name="Cris Perez",
+            email="cris@example.com",
+            phone="3000000000",
+            city="Bogota",
+            summary="Interes en backend",
+            skills="Node.js,SQL,Git",
+            projects="",
+            education="Tecnologo",
+            target_roles="backend_junior",
+        )
+        source = add_source(
+            session,
+            portal="computrabajo",
+            target_role="backend_junior",
+            search_url="https://computrabajo.example/jobs",
+            interval_minutes=15,
+            min_interval_minutes=settings.min_monitor_interval_minutes,
+        )
+        job = ScrapedJob(
+            title="Backend Junior",
+            company="ABC Tecnologia",
+            portal="computrabajo",
+            location="Bogota",
+            modality="Remoto",
+            salary="",
+            url="https://computrabajo.example/jobs/200",
+            description="Backend junior con Node.js, SQL, Git y APIs REST.",
+            requirements="Junior",
+            published_at=datetime.now(UTC),
+            found_at=datetime.now(UTC),
+            raw_posted_text="Publicada hoy",
+            source_id=source.id,
+        )
+
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.get_scraper",
+            lambda portal, settings: _FakeScraper([job]),
+        )
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.send_job_alert_digest",
+            lambda offers, settings, title=None: (False, "Credenciales de Telegram incompletas; no se envio notificacion.", []),
+        )
+        run_fresh_monitor(session, settings, force_all=True)
+
+        created_offer = list_offers(session)[0]
+        assert created_offer.telegram_notified is False
+
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.send_job_alert_digest",
+            lambda offers, settings, title=None: calls.append([offer.id for offer in offers]) or (True, "Digest enviado por Telegram con 1 ofertas.", offers),
+        )
+        logs = run_fresh_monitor(session, settings, force_all=True)
+
+        updated_offer = list_offers(session)[0]
+        assert updated_offer.telegram_notified is True
+        assert calls == [[updated_offer.id]]
+        assert any("pending_alerts=1" in line for line in logs)
+        assert any("queued_alerts=1" in line for line in logs)
+
+
+def test_monitor_does_not_resend_duplicate_offer_if_already_notified(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+    session_factory = create_session_factory(engine)
+    calls: list[list[int]] = []
+
+    with Session(session_factory.kw["bind"]) as session:
+        upsert_profile(
+            session,
+            full_name="Cris Perez",
+            email="cris@example.com",
+            phone="3000000000",
+            city="Bogota",
+            summary="Interes en soporte",
+            skills="SQL,Git",
+            projects="",
+            education="Tecnologo",
+            target_roles="soporte_aplicaciones",
+        )
+        source = add_source(
+            session,
+            portal="computrabajo",
+            target_role="soporte_aplicaciones",
+            search_url="https://computrabajo.example/jobs",
+            interval_minutes=15,
+            min_interval_minutes=settings.min_monitor_interval_minutes,
+        )
+        job = ScrapedJob(
+            title="Soporte de Aplicaciones Junior",
+            company="ABC Tecnologia",
+            portal="computrabajo",
+            location="Bogota",
+            modality="Hibrido",
+            salary="",
+            url="https://computrabajo.example/jobs/201",
+            description="Soporte, SQL, tickets y documentacion.",
+            requirements="Junior",
+            published_at=datetime.now(UTC),
+            found_at=datetime.now(UTC),
+            raw_posted_text="Publicada hoy",
+            source_id=source.id,
+        )
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.get_scraper",
+            lambda portal, settings: _FakeScraper([job]),
+        )
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.send_job_alert_digest",
+            lambda offers, settings, title=None: calls.append([offer.id for offer in offers]) or (True, "Digest enviado por Telegram con 1 ofertas.", offers),
+        )
+
+        run_fresh_monitor(session, settings, force_all=True)
+        run_fresh_monitor(session, settings, force_all=True)
+
         assert len(calls) == 1
+
+
+def test_retry_pending_alerts_sends_saved_offers(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+    session_factory = create_session_factory(engine)
+    calls: list[list[int]] = []
+
+    with Session(session_factory.kw["bind"]) as session:
+        offer = JobOffer(
+            title="Frontend Junior",
+            company="UI Labs",
+            portal="computrabajo",
+            location="Bogota",
+            modality="Remoto",
+            salary="",
+            url="https://example.com/frontend",
+            description="React, Next.js, TypeScript y Vercel.",
+            requirements="Junior",
+            compatibility_score=82,
+            telegram_notified=False,
+        )
+        session.add(offer)
+        session.commit()
+        session.refresh(offer)
+
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.send_job_alert_digest",
+            lambda offers, settings, title=None: calls.append([offer.id for offer in offers]) or (True, "Digest enviado por Telegram con 1 ofertas.", offers),
+        )
+
+        logs = retry_pending_alerts(session, settings)
+        updated = list_offers(session)[0]
+
+        assert updated.telegram_notified is True
+        assert calls == [[updated.id]]
+        assert any("digest enviado con 1 ofertas" in line.lower() for line in logs)
+
+
+def test_retry_pending_alerts_sends_grouped_digest_once(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+    session_factory = create_session_factory(engine)
+    calls: list[list[int]] = []
+
+    with Session(session_factory.kw["bind"]) as session:
+        offer_a = JobOffer(
+            title="Backend Junior",
+            company="API Labs",
+            portal="computrabajo",
+            location="Bogota",
+            modality="Remoto",
+            salary="",
+            url="https://example.com/retry-a",
+            description="Node.js",
+            requirements="Junior",
+            compatibility_score=78,
+            telegram_notified=False,
+        )
+        offer_b = JobOffer(
+            title="Frontend Junior",
+            company="UI Labs",
+            portal="computrabajo",
+            location="Bogota",
+            modality="Remoto",
+            salary="",
+            url="https://example.com/retry-b",
+            description="React",
+            requirements="Junior",
+            compatibility_score=79,
+            telegram_notified=False,
+        )
+        session.add_all([offer_a, offer_b])
+        session.commit()
+        session.refresh(offer_a)
+        session.refresh(offer_b)
+
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.send_job_alert_digest",
+            lambda offers, settings, title=None: calls.append([offer.id for offer in offers]) or (True, "Digest enviado por Telegram con 2 ofertas.", offers),
+        )
+
+        logs = retry_pending_alerts(session, settings)
+
+        assert calls == [[offer_b.id, offer_a.id]] or calls == [[offer_a.id, offer_b.id]]
+        assert any("digest enviado con 2 ofertas" in line.lower() for line in logs)
+
+
+def test_monitor_fresh_notify_pending_retries_existing_pending(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+    session_factory = create_session_factory(engine)
+    calls: list[list[int]] = []
+
+    with Session(session_factory.kw["bind"]) as session:
+        source = add_source(
+            session,
+            portal="computrabajo",
+            target_role="frontend_junior",
+            search_url="https://computrabajo.example/jobs",
+            interval_minutes=15,
+            min_interval_minutes=settings.min_monitor_interval_minutes,
+        )
+        pending_offer = JobOffer(
+            title="Frontend Junior",
+            company="UI Labs",
+            portal="computrabajo",
+            location="Bogota",
+            modality="Remoto",
+            salary="",
+            url="https://example.com/frontend-pending",
+            description="React, Next.js, TypeScript y Vercel.",
+            requirements="Junior",
+            compatibility_score=83,
+            telegram_notified=False,
+            source_id=source.id,
+        )
+        session.add(pending_offer)
+        session.commit()
+
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.get_scraper",
+            lambda portal, settings: _FakeScraper([]),
+        )
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.send_job_alert_digest",
+            lambda offers, settings, title=None: calls.append([offer.id for offer in offers]) or (True, "Digest enviado por Telegram con 1 ofertas.", offers),
+        )
+
+        logs = run_fresh_monitor(session, settings, force_all=True, notify_pending=True)
+
+        assert calls == [[pending_offer.id]]
+        assert any("pending_alerts=1" in line for line in logs)
+        assert list_pending_alert_offers(session, threshold=settings.match_threshold) == []
+
+
+def test_retry_pending_alerts_does_not_fail_with_invalid_timezone(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path)
+    settings.timezone_name = "Invalid/Timezone"
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+    session_factory = create_session_factory(engine)
+
+    with Session(session_factory.kw["bind"]) as session:
+        offer = JobOffer(
+            title="Backend Junior",
+            company="API Labs",
+            portal="computrabajo",
+            location="Bogota",
+            modality="Remoto",
+            salary="",
+            url="https://example.com/backend-invalid-tz",
+            description="Node.js y SQL",
+            requirements="Junior",
+            compatibility_score=78,
+            telegram_notified=False,
+        )
+        session.add(offer)
+        session.commit()
+
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.send_job_alert_digest",
+            lambda offers, settings, title=None: (True, "Digest enviado por Telegram con 1 ofertas.", offers),
+        )
+
+        logs = retry_pending_alerts(session, settings)
+
+        assert any("digest enviado con 1 ofertas" in line.lower() for line in logs)
 
 
 def test_freshness_detection_supports_relative_and_absolute_dates():

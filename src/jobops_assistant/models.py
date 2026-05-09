@@ -52,6 +52,8 @@ class JobOffer(Base):
     normalized_url: Mapped[str] = mapped_column(String(1000), default="")
     url_hash: Mapped[str] = mapped_column(String(64), default="")
     source_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    telegram_notified: Mapped[bool] = mapped_column(Boolean, default=False)
+    telegram_notified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -71,14 +73,46 @@ class JobSearchSource(Base):
     location: Mapped[str] = mapped_column(String(255), default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     interval_minutes: Mapped[int] = mapped_column(Integer, default=15)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[str] = mapped_column(Text, default="")
+    paused_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_failed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
     )
+
+
+class DiscardedJob(Base):
+    __tablename__ = "discarded_jobs"
+    __table_args__ = (UniqueConstraint("url_hash", name="uq_discarded_job_url_hash"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    portal: Mapped[str] = mapped_column(String(100), default="")
+    source_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_role: Mapped[str] = mapped_column(String(100), default="")
+    title: Mapped[str] = mapped_column(String(255), default="")
+    company: Mapped[str] = mapped_column(String(255), default="")
+    location: Mapped[str] = mapped_column(String(255), default="")
+    modality: Mapped[str] = mapped_column(String(100), default="")
+    salary: Mapped[str] = mapped_column(String(100), default="")
+    url: Mapped[str] = mapped_column(String(1000), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    requirements: Mapped[str] = mapped_column(Text, default="")
+    raw_posted_text: Mapped[str] = mapped_column(Text, default="")
+    compatibility_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    discard_reasons: Mapped[str] = mapped_column(Text, default="[]")
+    detected_keywords: Mapped[str] = mapped_column(Text, default="[]")
+    source_url: Mapped[str] = mapped_column(String(2000), default="")
+    found_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    normalized_url: Mapped[str] = mapped_column(String(1000), default="")
+    url_hash: Mapped[str] = mapped_column(String(64), default="")
+    seen_count: Mapped[int] = mapped_column(Integer, default=1)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class JobSeenHash(Base):
