@@ -24,6 +24,11 @@ class Settings:
     templates_dir: Path
     generated_dir: Path
     timezone_name: str = "America/Bogota"
+    enable_selenium: bool = False
+    selenium_headless: bool = True
+    selenium_page_load_timeout: int = 30
+    selenium_scroll_pause: int = 3
+    selenium_max_scrolls: int = 5
 
 
 def load_settings() -> Settings:
@@ -50,4 +55,13 @@ def load_settings() -> Settings:
         templates_dir=templates_dir,
         generated_dir=generated_dir,
         timezone_name=os.getenv("JOBOPS_TIMEZONE", "America/Bogota").strip() or "America/Bogota",
+        enable_selenium=_parse_bool(os.getenv("JOBOPS_ENABLE_SELENIUM", "false")),
+        selenium_headless=_parse_bool(os.getenv("JOBOPS_SELENIUM_HEADLESS", "true")),
+        selenium_page_load_timeout=int(os.getenv("JOBOPS_SELENIUM_PAGE_LOAD_TIMEOUT", "30")),
+        selenium_scroll_pause=int(os.getenv("JOBOPS_SELENIUM_SCROLL_PAUSE", "3")),
+        selenium_max_scrolls=int(os.getenv("JOBOPS_SELENIUM_MAX_SCROLLS", "5")),
     )
+
+
+def _parse_bool(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}

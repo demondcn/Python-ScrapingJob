@@ -33,6 +33,7 @@ from .job_service import (
     update_offer_status,
 )
 from .message_generator import generate_application_message
+from .models import JobSearchSource
 from .profile_service import get_profile, upsert_profile
 from .resume_profile_service import DEFAULT_RESUME_PROFILE_PATH, load_resume_profile, save_resume_profile
 from .resume_reader import read_resume_file
@@ -210,6 +211,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sources_disable_blocked = sources_sub.add_parser("disable-blocked", help="Desactiva fuentes con bloqueos repetidos")
     sources_disable_blocked.set_defaults(handler=_handle_sources_disable_blocked)
+
+    selenium_parser = subparsers.add_parser("selenium", help="Prueba scrapers opcionales con Selenium")
+    selenium_sub = selenium_parser.add_subparsers(dest="selenium_command", required=True)
+    selenium_test = selenium_sub.add_parser("test", help="Prueba una URL publica con Selenium sin guardar resultados")
+    selenium_test.add_argument("--portal", required=True, choices=("indeed", "linkedin", "indeed_selenium", "linkedin_selenium"))
+    selenium_test.add_argument("--url", required=True)
+    selenium_test.add_argument("--target-role", required=True)
+    selenium_test.set_defaults(handler=_handle_selenium_test)
 
     monitor_parser = subparsers.add_parser("monitor", help="Monitorea ofertas frescas")
     monitor_sub = monitor_parser.add_subparsers(dest="monitor_command", required=True)
@@ -790,6 +799,44 @@ def _handle_sources_disable_blocked(args, session: Session, settings, session_fa
         return 0
     print(f"Fuentes bloqueadas desactivadas: {len(sources)}")
     return 0
+
+
+def _handle_selenium_test(args, session: Session, settings, session_factory) -> int:
+    portal = _normalize_selenium_portal(args.portal)
+    source = JobSearchSource(
+        portal=portal,
+        target_role=args.target_role,
+        search_url=args.url,
+        keywords="",
+        location="",
+        enabled=True,
+        interval_minutes=max(30, settings.min_monitor_interval_minutes),
+    )
+    result = test_source(settings, source)
+    print(f"Portal: {portal}")
+    print(f"URL: {source.search_url}")
+    if result.error:
+        print(f"Error: {result.error}")
+        return 1
+    print(f"Ofertas detectadas: {len(result.offers)}")
+    for item in result.offers[:10]:
+        print(f"- {item.title} | {item.company} | {item.location} | {item.url}")
+        preview = (item.description or item.requirements or "").replace("\n", " ").strip()
+        if preview:
+            print(f"  descripcion: {preview[:180]}")
+    if result.discarded:
+        print(f"Ofertas descartadas por relevancia: {len(result.discarded)}")
+        for discarded in result.discarded[:5]:
+            reason_text = "; ".join(discarded.reasons) if discarded.reasons else "sin razon registrada"
+            print(f"- Descartada: {discarded.job.title} | razon: {reason_text} | {discarded.job.url}")
+    return 0
+
+
+def _normalize_selenium_portal(portal: str) -> str:
+    normalized = portal.strip().lower()
+    if normalized in {"indeed", "linkedin"}:
+        return f"{normalized}_selenium"
+    return normalized
 
 
 def _handle_monitor_fresh(args, session: Session, settings, session_factory) -> int:

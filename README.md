@@ -70,6 +70,11 @@ Variables principales en `.env`:
 - `JOBOPS_TIMEZONE`: zona horaria para mensajes y fechas
 - `JOBOPS_TELEGRAM_DIGEST_MAX_JOBS`: maximo de ofertas por digest
 - `JOBOPS_TELEGRAM_MAX_MESSAGE_CHARS`: limite aproximado por parte del digest
+- `JOBOPS_ENABLE_SELENIUM`: activa scrapers opcionales con Selenium
+- `JOBOPS_SELENIUM_HEADLESS`: ejecuta el navegador Selenium sin ventana visible
+- `JOBOPS_SELENIUM_PAGE_LOAD_TIMEOUT`: timeout de carga de pagina Selenium
+- `JOBOPS_SELENIUM_SCROLL_PAUSE`: pausa entre scrolls Selenium
+- `JOBOPS_SELENIUM_MAX_SCROLLS`: cantidad maxima de scrolls Selenium
 - `TELEGRAM_BOT_TOKEN`: token del bot
 - `TELEGRAM_CHAT_ID`: chat id destino
 - `GMAIL_EMAIL`: correo para IMAP
@@ -242,6 +247,8 @@ Comandos:
 ```powershell
 python main.py sources add --portal linkedin --target-role devops_trainee --url "https://www.linkedin.com/jobs/search/?keywords=DevOps%20Trainee&location=Colombia&f_TPR=r86400" --interval 15
 python main.py sources add --portal computrabajo --target-role soporte_aplicaciones --url "URL_DE_COMPUTRABAJO_ORDENADA_POR_FECHA" --interval 15
+python main.py sources add --portal indeed_selenium --target-role backend_junior --url "URL_DE_INDEED" --interval 30
+python main.py sources add --portal linkedin_selenium --target-role devops_trainee --url "URL_DE_LINKEDIN" --interval 30
 python main.py sources list
 python main.py sources update-interval --id 1 --interval 10
 python main.py sources update-interval --portal computrabajo --interval 10
@@ -251,6 +258,8 @@ python main.py sources disable-blocked
 python main.py sources test --id 1
 python main.py sources test --id 14 --debug-html
 python main.py sources test --id 14 --show-discarded
+python main.py selenium test --portal indeed --url "URL_DE_INDEED" --target-role backend_junior
+python main.py selenium test --portal linkedin --url "URL_DE_LINKEDIN" --target-role devops_trainee
 python main.py monitor fresh
 python main.py monitor fresh --notify-pending
 python main.py monitor watch --interval 15
@@ -277,6 +286,42 @@ Comportamiento:
 - `Duplicado` significa que la oferta ya estaba guardada; no que la alerta quede descartada
 - Si una oferta supera el umbral pero no fue enviada por Telegram, queda como pendiente de alerta y puede reintentarse despues
 - `offer clear` borra ofertas, hashes vistos y registros relacionados, pero conserva las fuentes configuradas
+
+## Scraping opcional con Selenium
+
+Selenium es opcional y esta desactivado por defecto. Sirve para probar paginas publicas que cargan resultados de forma dinamica y que no entregan HTML util con `requests`, especialmente Indeed y LinkedIn.
+
+Activacion en `.env`:
+
+```powershell
+JOBOPS_ENABLE_SELENIUM=true
+JOBOPS_SELENIUM_HEADLESS=true
+JOBOPS_SELENIUM_PAGE_LOAD_TIMEOUT=30
+JOBOPS_SELENIUM_SCROLL_PAUSE=3
+JOBOPS_SELENIUM_MAX_SCROLLS=5
+```
+
+Comandos de prueba:
+
+```powershell
+python main.py selenium test --portal indeed --url "URL_DE_INDEED" --target-role backend_junior
+python main.py selenium test --portal linkedin --url "URL_DE_LINKEDIN" --target-role devops_trainee
+```
+
+Fuentes persistentes:
+
+```powershell
+python main.py sources add --portal indeed_selenium --target-role backend_junior --url "URL_DE_INDEED" --interval 30
+python main.py sources add --portal linkedin_selenium --target-role devops_trainee --url "URL_DE_LINKEDIN" --interval 30
+```
+
+Reglas de uso:
+
+- Solo usa paginas publicas.
+- No hace login, no usa cookies copiadas, no usa proxies y no resuelve captchas.
+- Si aparece Security Check, captcha, login, access denied o forbidden, registra el bloqueo y omite la fuente.
+- Puede ser mas lento que los scrapers con `requests`; para fuentes Selenium se recomienda intervalo minimo de 30 minutos.
+- Si Indeed o LinkedIn bloquean la lectura publica, usa alertas por correo del portal y el Gmail Reader como alternativa.
 
 Ejemplo de alerta Telegram:
 
