@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from time import sleep
 
 from bs4 import BeautifulSoup
@@ -13,6 +14,9 @@ from .base_scraper import (
 )
 
 SELENIUM_DISABLED_MESSAGE = "Selenium está desactivado. Activa JOBOPS_ENABLE_SELENIUM=true para usar este scraper."
+CHROME_PROFILE_IN_USE_MESSAGE = (
+    "El perfil de Chrome está en uso. Cierra todas las ventanas de Chrome o usa un perfil separado."
+)
 
 
 class SeleniumJobScraper(SelectorBasedScraper):
@@ -20,9 +24,10 @@ class SeleniumJobScraper(SelectorBasedScraper):
 
     portal_name = "selenium"
 
-    def __init__(self, settings, driver_factory=None) -> None:
+    def __init__(self, settings, driver_factory=None, *, log_selenium: bool = True) -> None:
         super().__init__(settings)
         self.driver_factory = driver_factory
+        self.log_selenium = log_selenium
 
     def fetch_search_results(self, source) -> str:
         if not self.settings.enable_selenium:
@@ -40,7 +45,7 @@ class SeleniumJobScraper(SelectorBasedScraper):
         requested_url = self.build_search_url(source)
         try:
             driver.set_page_load_timeout(self.settings.selenium_page_load_timeout)
-            driver.get(requested_url)
+            self._navigate_to_url(driver, requested_url)
             self._scroll_page(driver)
             html = getattr(driver, "page_source", "") or ""
             final_url = getattr(driver, "current_url", "") or requested_url
@@ -70,13 +75,59 @@ class SeleniumJobScraper(SelectorBasedScraper):
             raise SourceBlockedError("Selenium no está instalado. Ejecuta pip install -r requirements.txt.") from exc
 
         options = Options()
+        self._apply_chrome_options(options)
+        try:
+            return webdriver.Chrome(options=options)
+        except Exception as exc:
+            if self._is_chrome_profile_in_use_error(exc):
+                raise SourceBlockedError(CHROME_PROFILE_IN_USE_MESSAGE) from exc
+            raise
+
+    def _apply_chrome_options(self, options) -> None:
         if self.settings.selenium_headless:
             options.add_argument("--headless=new")
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--no-first-run")
+        options.add_argument("--no-default-browser-check")
+        options.add_argument("--disable-session-crashed-bubble")
+        options.add_argument("--disable-infobars")
+        user_data_dir = self._expand_chrome_setting(getattr(self.settings, "selenium_user_data_dir", ""))
+        if user_data_dir:
+            self._log_selenium(f"Selenium: usando user-data-dir={user_data_dir}")
+            options.add_argument(f"--user-data-dir={user_data_dir}")
+        profile_directory = str(getattr(self.settings, "selenium_profile_directory", "") or "").strip()
+        if profile_directory:
+            self._log_selenium(f"Selenium: usando profile-directory={profile_directory}")
+            options.add_argument(f"--profile-directory={profile_directory}")
         options.add_argument(f"--user-agent={self.settings.scraper_user_agent}")
-        return webdriver.Chrome(options=options)
+
+    def _navigate_to_url(self, driver, url: str) -> None:
+        self._log_selenium(f"Selenium: navegando a URL: {url}")
+        driver.get(url)
+        current_url = getattr(driver, "current_url", "") or ""
+        self._log_selenium(f"Selenium: current_url después de driver.get: {current_url}")
+
+    def _log_selenium(self, message: str) -> None:
+        if self.log_selenium:
+            print(message)
+
+    @staticmethod
+    def _expand_chrome_setting(value: str) -> str:
+        raw_value = str(value or "").strip().strip("\"'")
+        if not raw_value:
+            return ""
+        return os.path.expanduser(os.path.expandvars(raw_value))
+
+    @staticmethod
+    def _is_chrome_profile_in_use_error(exc: Exception) -> bool:
+        message = str(exc).casefold()
+        return (
+            "user data directory is already in use" in message
+            or "profile appears to be in use" in message
+            or "cannot create default profile directory" in message
+        )
 
     def _scroll_page(self, driver) -> None:
         pause = max(0, self.settings.selenium_scroll_pause)

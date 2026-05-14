@@ -82,19 +82,25 @@ def send_job_alert_digest(
         return False, "Credenciales de Telegram incompletas; no se envio notificacion.", []
 
     limited_jobs, additional_count = _limit_digest_jobs(jobs, settings.telegram_digest_max_jobs)
-    messages = _build_digest_messages(
+    digest_parts = _build_digest_parts(
         limited_jobs,
         settings,
         title=title,
         additional_count=additional_count,
     )
+    delivered_jobs: list[JobOffer] = []
     try:
-        for message in messages:
+        for message, part_jobs in digest_parts:
             _post_telegram_message(settings, message)
+            delivered_jobs.extend(part_jobs)
     except Exception as exc:
-        return False, f"Error enviando digest por Telegram: {exc}", []
+        return False, f"Error enviando digest por Telegram: {exc}", delivered_jobs
 
-    return True, f"Digest enviado por Telegram con {len(limited_jobs)} ofertas.", limited_jobs
+    message_count = len(digest_parts)
+    message = f"digest enviado con {len(delivered_jobs)} ofertas"
+    if message_count > 1:
+        message = f"{message} en {message_count} mensajes"
+    return True, message, delivered_jobs
 
 
 def register_notification(session, offer: JobOffer, channel: str, status: str, message: str) -> Notification:
@@ -148,29 +154,62 @@ def _build_digest_messages(
     title: str | None,
     additional_count: int,
 ) -> list[str]:
+    return [
+        message
+        for message, _part_jobs in _build_digest_parts(
+            jobs,
+            settings,
+            title=title,
+            additional_count=additional_count,
+        )
+    ]
+
+
+def _build_digest_parts(
+    jobs: list[JobOffer],
+    settings: Settings,
+    *,
+    title: str | None,
+    additional_count: int,
+) -> list[tuple[str, list[JobOffer]]]:
     sorted_jobs = _sort_digest_jobs(jobs)
     header = _build_digest_header(sorted_jobs, settings, title=title)
     footer = _build_digest_footer(additional_count)
-    entries = [_format_digest_entry(index, offer, settings) for index, offer in enumerate(sorted_jobs, start=1)]
+    entries = [
+        (_format_digest_entry(index, offer, settings), offer)
+        for index, offer in enumerate(sorted_jobs, start=1)
+    ]
 
     max_chars = max(500, settings.telegram_max_message_chars)
-    messages: list[str] = []
+    parts: list[tuple[str, list[JobOffer]]] = []
     current_entries: list[str] = []
-    for entry in entries:
+    current_jobs: list[JobOffer] = []
+    for entry, offer in entries:
         candidate_body = "\n\n".join(current_entries + [entry])
         candidate_message = "\n\n".join(part for part in [header, candidate_body, footer] if part)
         if current_entries and len(candidate_message) > max_chars:
-            messages.append("\n\n".join(part for part in [header, "\n\n".join(current_entries)] if part))
+            parts.append((
+                "\n\n".join(part for part in [header, "\n\n".join(current_entries)] if part),
+                current_jobs,
+            ))
             current_entries = [entry]
+            current_jobs = [offer]
         else:
             current_entries.append(entry)
+            current_jobs.append(offer)
     if current_entries:
-        messages.append("\n\n".join(part for part in [header, "\n\n".join(current_entries), footer] if part))
+        parts.append((
+            "\n\n".join(part for part in [header, "\n\n".join(current_entries), footer] if part),
+            current_jobs,
+        ))
 
-    if len(messages) <= 1:
-        return messages
-    total = len(messages)
-    return [f"{message}\n\nParte {index}/{total}" for index, message in enumerate(messages, start=1)]
+    if len(parts) <= 1:
+        return parts
+    total = len(parts)
+    return [
+        (f"{message}\n\nParte {index}/{total}", part_jobs)
+        for index, (message, part_jobs) in enumerate(parts, start=1)
+    ]
 
 
 def _build_digest_header(jobs: list[JobOffer], settings: Settings, *, title: str | None) -> str:
@@ -224,6 +263,8 @@ def _format_digest_entry(index: int, offer: JobOffer, settings: Settings) -> str
 
 def _limit_digest_jobs(jobs: list[JobOffer], max_jobs: int) -> tuple[list[JobOffer], int]:
     ordered = _sort_digest_jobs(jobs)
+    if max_jobs <= 0:
+        return ordered, 0
     limited = ordered[:max_jobs]
     return limited, max(0, len(ordered) - len(limited))
 

@@ -29,6 +29,9 @@ class Settings:
     selenium_page_load_timeout: int = 30
     selenium_scroll_pause: int = 3
     selenium_max_scrolls: int = 5
+    selenium_user_data_dir: str = ""
+    selenium_profile_directory: str = ""
+    linkedin_fetch_details: bool = False
 
 
 def load_settings() -> Settings:
@@ -50,7 +53,12 @@ def load_settings() -> Settings:
         ).strip(),
         max_results_per_source=int(os.getenv("JOBOPS_MAX_RESULTS_PER_SOURCE", "25")),
         min_monitor_interval_minutes=int(os.getenv("JOBOPS_MIN_MONITOR_INTERVAL_MINUTES", "10")),
-        telegram_digest_max_jobs=int(os.getenv("JOBOPS_TELEGRAM_DIGEST_MAX_JOBS", "10")),
+        telegram_digest_max_jobs=int(
+            os.getenv(
+                "JOBOPS_TELEGRAM_DIGEST_LIMIT",
+                os.getenv("JOBOPS_TELEGRAM_DIGEST_MAX_JOBS", "0"),
+            )
+        ),
         telegram_max_message_chars=int(os.getenv("JOBOPS_TELEGRAM_MAX_MESSAGE_CHARS", "3500")),
         templates_dir=templates_dir,
         generated_dir=generated_dir,
@@ -60,6 +68,9 @@ def load_settings() -> Settings:
         selenium_page_load_timeout=int(os.getenv("JOBOPS_SELENIUM_PAGE_LOAD_TIMEOUT", "30")),
         selenium_scroll_pause=int(os.getenv("JOBOPS_SELENIUM_SCROLL_PAUSE", "3")),
         selenium_max_scrolls=int(os.getenv("JOBOPS_SELENIUM_MAX_SCROLLS", "5")),
+        selenium_user_data_dir=os.getenv("JOBOPS_SELENIUM_USER_DATA_DIR", "").strip(),
+        selenium_profile_directory=os.getenv("JOBOPS_SELENIUM_PROFILE_DIRECTORY", "").strip(),
+        linkedin_fetch_details=_parse_bool(os.getenv("JOBOPS_LINKEDIN_FETCH_DETAILS", "false")),
     )
 
 

@@ -37,7 +37,9 @@ from .models import JobSearchSource
 from .profile_service import get_profile, upsert_profile
 from .resume_profile_service import DEFAULT_RESUME_PROFILE_PATH, load_resume_profile, save_resume_profile
 from .resume_reader import read_resume_file
+from .scrapers.linkedin_selenium_scraper import build_linkedin_jobs_url
 from .scrapers.registry import list_supported_portals
+from .scrapers.selenium_base import SeleniumJobScraper
 from .search_sources import (
     add_source,
     disable_blocked_sources,
@@ -55,6 +57,8 @@ from .telegram_notifier import format_job_alert, send_job_alert
 from .workflows import run_daily_scan
 
 DEFAULT_DISCARDED_LIST_LIMIT = 20
+LINKEDIN_HOME_URL = "https://www.linkedin.com/"
+LINKEDIN_LOGIN_PROFILE_MESSAGE = "Inicia sesión manualmente en LinkedIn y luego cierra Chrome."
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -216,9 +220,37 @@ def build_parser() -> argparse.ArgumentParser:
     selenium_sub = selenium_parser.add_subparsers(dest="selenium_command", required=True)
     selenium_test = selenium_sub.add_parser("test", help="Prueba una URL publica con Selenium sin guardar resultados")
     selenium_test.add_argument("--portal", required=True, choices=("indeed", "linkedin", "indeed_selenium", "linkedin_selenium"))
-    selenium_test.add_argument("--url", required=True)
+    selenium_test.add_argument("--url")
+    selenium_test.add_argument("--keyword")
+    selenium_test.add_argument("--location")
+    selenium_test.add_argument("--date-posted", default="24h", choices=("any", "24h", "week", "month"))
+    selenium_test.add_argument(
+        "--experience-level",
+        dest="experience_levels",
+        action="append",
+        choices=("internship", "entry_level", "associate"),
+    )
+    selenium_test.add_argument(
+        "--workplace",
+        dest="workplace_types",
+        action="append",
+        choices=("onsite", "remote", "hybrid"),
+    )
     selenium_test.add_argument("--target-role", required=True)
     selenium_test.set_defaults(handler=_handle_selenium_test)
+
+    linkedin_parser = subparsers.add_parser("linkedin", help="Utilidades de LinkedIn con perfil local de Chrome")
+    linkedin_sub = linkedin_parser.add_subparsers(dest="linkedin_command", required=True)
+    linkedin_login_profile = linkedin_sub.add_parser(
+        "login-profile",
+        help="Abre LinkedIn con el perfil local de Chrome para iniciar sesion manualmente",
+    )
+    linkedin_login_profile.set_defaults(handler=_handle_linkedin_login_profile)
+    linkedin_profile_info = linkedin_sub.add_parser(
+        "profile-info",
+        help="Muestra la configuracion del perfil local de Chrome para Selenium",
+    )
+    linkedin_profile_info.set_defaults(handler=_handle_linkedin_profile_info)
 
     monitor_parser = subparsers.add_parser("monitor", help="Monitorea ofertas frescas")
     monitor_sub = monitor_parser.add_subparsers(dest="monitor_command", required=True)
@@ -803,12 +835,17 @@ def _handle_sources_disable_blocked(args, session: Session, settings, session_fa
 
 def _handle_selenium_test(args, session: Session, settings, session_factory) -> int:
     portal = _normalize_selenium_portal(args.portal)
+    try:
+        search_url = _resolve_selenium_test_url(args, portal)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
     source = JobSearchSource(
         portal=portal,
         target_role=args.target_role,
-        search_url=args.url,
-        keywords="",
-        location="",
+        search_url=search_url,
+        keywords=(getattr(args, "keyword", None) or "").strip(),
+        location=(getattr(args, "location", None) or "").strip(),
         enabled=True,
         interval_minutes=max(30, settings.min_monitor_interval_minutes),
     )
@@ -837,6 +874,73 @@ def _normalize_selenium_portal(portal: str) -> str:
     if normalized in {"indeed", "linkedin"}:
         return f"{normalized}_selenium"
     return normalized
+
+
+def _resolve_selenium_test_url(args, portal: str) -> str:
+    explicit_url = (getattr(args, "url", None) or "").strip()
+    if explicit_url:
+        return explicit_url
+    if portal != "linkedin_selenium":
+        raise ValueError("Debes indicar --url para este portal.")
+    return build_linkedin_jobs_url(
+        getattr(args, "keyword", "") or "",
+        getattr(args, "location", "") or "",
+        date_posted=getattr(args, "date_posted", "24h") or "24h",
+        experience_levels=getattr(args, "experience_levels", None),
+        workplace_types=getattr(args, "workplace_types", None),
+    )
+
+
+def _handle_linkedin_login_profile(args, session: Session, settings, session_factory) -> int:
+    driver = None
+    try:
+        driver = _build_linkedin_profile_driver(settings)
+        _navigate_linkedin_profile_driver(driver, LINKEDIN_HOME_URL)
+        print(LINKEDIN_LOGIN_PROFILE_MESSAGE)
+        _wait_for_linkedin_profile_browser_close(driver)
+        return 0
+    except Exception as exc:
+        print(str(exc))
+        return 1
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+
+def _handle_linkedin_profile_info(args, session: Session, settings, session_factory) -> int:
+    user_data_dir = SeleniumJobScraper._expand_chrome_setting(
+        getattr(settings, "selenium_user_data_dir", "")
+    )
+    profile_directory = str(getattr(settings, "selenium_profile_directory", "") or "").strip()
+    profile_path = Path(user_data_dir) / profile_directory if user_data_dir and profile_directory else Path(user_data_dir)
+    print(f"JOBOPS_SELENIUM_USER_DATA_DIR: {user_data_dir}")
+    print(f"JOBOPS_SELENIUM_PROFILE_DIRECTORY: {profile_directory}")
+    print(f"carpeta existe: {profile_path.exists()}")
+    print(f"JOBOPS_SELENIUM_HEADLESS: {settings.selenium_headless}")
+    return 0
+
+
+def _build_linkedin_profile_driver(settings):
+    scraper = SeleniumJobScraper(settings, log_selenium=False)
+    return scraper._build_driver()
+
+
+def _navigate_linkedin_profile_driver(driver, url: str) -> None:
+    driver.get(url)
+
+
+def _wait_for_linkedin_profile_browser_close(driver, *, poll_seconds: float = 1.0) -> None:
+    while True:
+        try:
+            handles = driver.window_handles
+        except Exception:
+            return
+        if not handles:
+            return
+        time.sleep(poll_seconds)
 
 
 def _handle_monitor_fresh(args, session: Session, settings, session_factory) -> int:

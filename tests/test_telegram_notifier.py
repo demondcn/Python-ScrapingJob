@@ -174,6 +174,106 @@ def test_send_job_alert_digest_limits_jobs_and_mentions_additional(monkeypatch, 
     assert "3. C" not in sent_messages[0]
 
 
+def test_send_job_alert_digest_limit_zero_sends_all_jobs(monkeypatch, tmp_path):
+    sent_messages: list[str] = []
+    settings = Settings(
+        db_path=tmp_path / "db.sqlite",
+        match_threshold=50,
+        telegram_bot_token="token",
+        telegram_chat_id="chat",
+        gmail_email="",
+        gmail_app_password="",
+        scraper_timeout=5,
+        scraper_user_agent="agent",
+        max_results_per_source=25,
+        min_monitor_interval_minutes=10,
+        telegram_digest_max_jobs=0,
+        telegram_max_message_chars=20000,
+        templates_dir=tmp_path / "templates",
+        generated_dir=tmp_path / "generated",
+        timezone_name="UTC",
+    )
+    offers = [
+        JobOffer(
+            id=index,
+            title=f"Oferta {index}",
+            company="Empresa",
+            portal="Portal",
+            location="Bogota",
+            modality="Remoto",
+            salary="",
+            url=f"https://example.com/{index}",
+            compatibility_score=100 - index,
+        )
+        for index in range(1, 26)
+    ]
+
+    monkeypatch.setattr(
+        "src.jobops_assistant.telegram_notifier._post_telegram_message",
+        lambda settings, message: sent_messages.append(message),
+    )
+
+    sent, message, delivered = send_job_alert_digest(offers, settings)
+
+    assert sent is True
+    assert message == "digest enviado con 25 ofertas"
+    assert len(delivered) == 25
+    assert [offer.id for offer in delivered] == list(range(1, 26))
+    assert len(sent_messages) == 1
+    assert "25. Oferta 25" in sent_messages[0]
+
+
+def test_send_job_alert_digest_positive_limit_caps_jobs(monkeypatch, tmp_path):
+    sent_messages: list[str] = []
+    settings = Settings(
+        db_path=tmp_path / "db.sqlite",
+        match_threshold=50,
+        telegram_bot_token="token",
+        telegram_chat_id="chat",
+        gmail_email="",
+        gmail_app_password="",
+        scraper_timeout=5,
+        scraper_user_agent="agent",
+        max_results_per_source=25,
+        min_monitor_interval_minutes=10,
+        telegram_digest_max_jobs=10,
+        telegram_max_message_chars=20000,
+        templates_dir=tmp_path / "templates",
+        generated_dir=tmp_path / "generated",
+        timezone_name="UTC",
+    )
+    offers = [
+        JobOffer(
+            id=index,
+            title=f"Oferta {index}",
+            company="Empresa",
+            portal="Portal",
+            location="Bogota",
+            modality="Remoto",
+            salary="",
+            url=f"https://example.com/{index}",
+            compatibility_score=100 - index,
+        )
+        for index in range(1, 26)
+    ]
+
+    monkeypatch.setattr(
+        "src.jobops_assistant.telegram_notifier._post_telegram_message",
+        lambda settings, message: sent_messages.append(message),
+    )
+
+    sent, message, delivered = send_job_alert_digest(offers, settings)
+
+    assert sent is True
+    assert message == "digest enviado con 10 ofertas"
+    assert len(delivered) == 10
+    assert [offer.id for offer in delivered] == list(range(1, 11))
+    assert len(sent_messages) == 1
+    assert "Hay 15 ofertas adicionales guardadas" in sent_messages[0]
+    assert "10. Oferta 10" in sent_messages[0]
+    assert "11. Oferta 11" not in sent_messages[0]
+
+
 def test_send_job_alert_digest_splits_long_messages(monkeypatch, tmp_path):
     sent_messages: list[str] = []
     settings = Settings(
@@ -204,9 +304,10 @@ def test_send_job_alert_digest_splits_long_messages(monkeypatch, tmp_path):
         lambda settings, message: sent_messages.append(message),
     )
 
-    sent, _, delivered = send_job_alert_digest(offers, settings)
+    sent, message, delivered = send_job_alert_digest(offers, settings)
 
     assert sent is True
+    assert message.startswith("digest enviado con 3 ofertas en ")
     assert len(delivered) == 3
     assert len(sent_messages) >= 2
     assert any("Parte 1/" in message for message in sent_messages)
@@ -248,4 +349,4 @@ def test_send_job_alert_digest_returns_false_if_any_part_fails(monkeypatch, tmp_
 
     assert sent is False
     assert "Error enviando digest por Telegram" in message
-    assert delivered == []
+    assert 0 < len(delivered) < len(offers)

@@ -303,11 +303,13 @@ def _send_digest_for_cycle(
     sent, message, delivered_offers = send_job_alert_digest(offers, settings)
     delivered_ids = {offer.id for offer in delivered_offers if offer.id is not None}
     for offer, _ in queue_items:
-        delivered = sent and offer.id in delivered_ids
+        delivered = offer.id in delivered_ids
         mark_offer_telegram_notified(session, offer, notified=delivered)
-        status = "sent" if delivered else ("pending" if sent else "error")
+        status = "sent" if delivered else ("pending" if delivered_offers else "error")
         register_notification(session, offer, "telegram", status, message)
     if sent:
+        if message.casefold().startswith("digest enviado con "):
+            return [f"[telegram] {message[:1].lower()}{message[1:]}"]
         return [f"[telegram] digest enviado con {len(delivered_offers)} ofertas"]
     return [f"[telegram] {message}"]
 

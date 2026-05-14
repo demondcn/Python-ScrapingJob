@@ -749,6 +749,67 @@ def test_retry_pending_alerts_sends_grouped_digest_once(tmp_path: Path, monkeypa
         assert any("digest enviado con 2 ofertas" in line.lower() for line in logs)
 
 
+def test_retry_pending_alerts_retries_only_not_delivered_after_partial_failure(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+    session_factory = create_session_factory(engine)
+    calls: list[list[int]] = []
+
+    with Session(session_factory.kw["bind"]) as session:
+        offers = [
+            JobOffer(
+                title=f"Backend Junior {index}",
+                company="API Labs",
+                portal="computrabajo",
+                location="Bogota",
+                modality="Remoto",
+                salary="",
+                url=f"https://example.com/retry-partial-{index}",
+                description="Node.js y SQL",
+                requirements="Junior",
+                compatibility_score=90 - index,
+                telegram_notified=False,
+            )
+            for index in range(4)
+        ]
+        session.add_all(offers)
+        session.commit()
+        for offer in offers:
+            session.refresh(offer)
+
+        def _partial_send(queued_offers, settings, title=None):
+            calls.append([offer.id for offer in queued_offers])
+            return False, "Error enviando digest por Telegram: fail", queued_offers[:2]
+
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.send_job_alert_digest",
+            _partial_send,
+        )
+
+        first_logs = retry_pending_alerts(session, settings)
+        after_partial = list_pending_alert_offers(session, threshold=settings.match_threshold)
+
+        assert any("Error enviando digest por Telegram" in line for line in first_logs)
+        assert len(after_partial) == 2
+        assert {offer.id for offer in after_partial} == {offers[2].id, offers[3].id}
+
+        def _successful_retry(queued_offers, settings, title=None):
+            calls.append([offer.id for offer in queued_offers])
+            return True, f"digest enviado con {len(queued_offers)} ofertas", queued_offers
+
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.send_job_alert_digest",
+            _successful_retry,
+        )
+
+        second_logs = retry_pending_alerts(session, settings)
+
+        assert calls[1] == [offers[2].id, offers[3].id]
+        assert list_pending_alert_offers(session, threshold=settings.match_threshold) == []
+        assert any("digest enviado con 2 ofertas" in line.lower() for line in second_logs)
+
+
 def test_monitor_fresh_notify_pending_retries_existing_pending(tmp_path: Path, monkeypatch):
     settings = _settings(tmp_path)
     engine = create_sqlite_engine(settings.db_path)

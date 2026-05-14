@@ -68,13 +68,16 @@ Variables principales en `.env`:
 - `JOBOPS_MAX_RESULTS_PER_SOURCE`: maximo de resultados por fuente
 - `JOBOPS_MIN_MONITOR_INTERVAL_MINUTES`: intervalo minimo entre revisiones
 - `JOBOPS_TIMEZONE`: zona horaria para mensajes y fechas
-- `JOBOPS_TELEGRAM_DIGEST_MAX_JOBS`: maximo de ofertas por digest
+- `JOBOPS_TELEGRAM_DIGEST_LIMIT`: maximo de ofertas por digest; `0` envia todas las ofertas pendientes
 - `JOBOPS_TELEGRAM_MAX_MESSAGE_CHARS`: limite aproximado por parte del digest
 - `JOBOPS_ENABLE_SELENIUM`: activa scrapers opcionales con Selenium
 - `JOBOPS_SELENIUM_HEADLESS`: ejecuta el navegador Selenium sin ventana visible
 - `JOBOPS_SELENIUM_PAGE_LOAD_TIMEOUT`: timeout de carga de pagina Selenium
 - `JOBOPS_SELENIUM_SCROLL_PAUSE`: pausa entre scrolls Selenium
 - `JOBOPS_SELENIUM_MAX_SCROLLS`: cantidad maxima de scrolls Selenium
+- `JOBOPS_SELENIUM_USER_DATA_DIR`: perfil local de Chrome que Selenium debe reutilizar
+- `JOBOPS_SELENIUM_PROFILE_DIRECTORY`: carpeta del perfil de Chrome, por ejemplo `Default`
+- `JOBOPS_LINKEDIN_FETCH_DETAILS`: intenta abrir cada oferta publica de LinkedIn para leer `div.description__text` (default `false`)
 - `TELEGRAM_BOT_TOKEN`: token del bot
 - `TELEGRAM_CHAT_ID`: chat id destino
 - `GMAIL_EMAIL`: correo para IMAP
@@ -169,7 +172,7 @@ python main.py send-summary
 Si faltan credenciales, la aplicacion no falla: solo mostrara una advertencia.
 
 Las alertas de Telegram muestran la fecha/hora de publicacion cuando el portal la permite y siempre incluyen la fecha/hora de deteccion por JobOps.
-El monitor usa modo digest por ciclo: no manda un mensaje por cada oferta, sino un resumen agrupado de las ofertas notificables encontradas en el ciclo. Si el resumen es muy largo, lo divide en partes; si hay demasiadas ofertas, limita segun configuracion.
+El monitor usa modo digest por ciclo: no manda un mensaje por cada oferta, sino un resumen agrupado de las ofertas notificables encontradas en el ciclo. Si el resumen es muy largo, lo divide en partes automaticamente. `JOBOPS_TELEGRAM_DIGEST_LIMIT=0` envia todas las ofertas pendientes; si se configura con un numero mayor que cero, envia como maximo esa cantidad.
 
 ## Gmail
 
@@ -260,6 +263,7 @@ python main.py sources test --id 14 --debug-html
 python main.py sources test --id 14 --show-discarded
 python main.py selenium test --portal indeed --url "URL_DE_INDEED" --target-role backend_junior
 python main.py selenium test --portal linkedin --url "URL_DE_LINKEDIN" --target-role devops_trainee
+python main.py selenium test --portal linkedin --keyword "DevOps Trainee" --location "Colombia" --date-posted 24h --experience-level entry_level --workplace remote --workplace hybrid --target-role devops_trainee
 python main.py monitor fresh
 python main.py monitor fresh --notify-pending
 python main.py monitor watch --interval 15
@@ -295,10 +299,13 @@ Activacion en `.env`:
 
 ```powershell
 JOBOPS_ENABLE_SELENIUM=true
-JOBOPS_SELENIUM_HEADLESS=true
+JOBOPS_SELENIUM_HEADLESS=false
 JOBOPS_SELENIUM_PAGE_LOAD_TIMEOUT=30
 JOBOPS_SELENIUM_SCROLL_PAUSE=3
 JOBOPS_SELENIUM_MAX_SCROLLS=5
+JOBOPS_SELENIUM_USER_DATA_DIR=%LOCALAPPDATA%/Google/Chrome/User Data
+JOBOPS_SELENIUM_PROFILE_DIRECTORY=Default
+JOBOPS_LINKEDIN_FETCH_DETAILS=false
 ```
 
 Comandos de prueba:
@@ -306,20 +313,25 @@ Comandos de prueba:
 ```powershell
 python main.py selenium test --portal indeed --url "URL_DE_INDEED" --target-role backend_junior
 python main.py selenium test --portal linkedin --url "URL_DE_LINKEDIN" --target-role devops_trainee
+python main.py selenium test --portal linkedin --keyword "DevOps Trainee" --location "Colombia" --date-posted 24h --experience-level entry_level --workplace remote --workplace hybrid --target-role devops_trainee
+python main.py selenium test --portal linkedin --keyword "Junior Backend" --location "Colombia" --date-posted 24h --experience-level entry_level --target-role backend_junior
 ```
 
 Fuentes persistentes:
 
 ```powershell
 python main.py sources add --portal indeed_selenium --target-role backend_junior --url "URL_DE_INDEED" --interval 30
-python main.py sources add --portal linkedin_selenium --target-role devops_trainee --url "URL_DE_LINKEDIN" --interval 30
+python main.py sources add --portal linkedin_selenium --target-role devops_trainee --url "URL_GENERADA" --interval 30
 ```
 
 Reglas de uso:
 
 - Solo usa paginas publicas.
-- No hace login, no usa cookies copiadas, no usa proxies y no resuelve captchas.
-- Si aparece Security Check, captcha, login, access denied o forbidden, registra el bloqueo y omite la fuente.
+- No automatiza login, no usa proxies y no resuelve captchas; si configuras un perfil de Chrome, reutiliza la sesion/cookies locales de ese perfil.
+- Para reutilizar una sesion ya abierta en Chrome, ejecuta Selenium con `JOBOPS_SELENIUM_HEADLESS=false`, `JOBOPS_SELENIUM_USER_DATA_DIR` apuntando al `User Data` local de Chrome y `JOBOPS_SELENIUM_PROFILE_DIRECTORY=Default` o el perfil que corresponda.
+- LinkedIn usa Selenium para abrir la busqueda publica, hacer scroll limitado, pulsar el boton publico de mas resultados cuando aparece y parsear cards `div.base-card` con BeautifulSoup.
+- Los filtros del constructor de URL de LinkedIn mapean `24h` a `f_TPR=r86400`, `entry_level` a `f_E=2`, y `remote` + `hybrid` a `f_WT=2,3`.
+- Si aparece Security Check, captcha, login, authwall, checkpoint, access denied o forbidden, registra el bloqueo y omite la fuente.
 - Puede ser mas lento que los scrapers con `requests`; para fuentes Selenium se recomienda intervalo minimo de 30 minutos.
 - Si Indeed o LinkedIn bloquean la lectura publica, usa alertas por correo del portal y el Gmail Reader como alternativa.
 
