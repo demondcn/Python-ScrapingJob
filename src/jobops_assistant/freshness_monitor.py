@@ -7,7 +7,9 @@ import re
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .application_types import LINKEDIN_EASY_APPLY
 from .discarded_job_service import (
+    analyze_linkedin_application_type_for_discard,
     analyze_scraped_job_for_discard,
     build_url_hash,
     remove_discarded_job_by_url_hash,
@@ -62,6 +64,14 @@ class IngestedJob:
     created: bool
 
 
+@dataclass(slots=True)
+class DigestSendOutcome:
+    attempted_offer_ids: set[int]
+    delivered_offer_ids: set[int]
+    sent: bool
+    message: str
+
+
 def run_fresh_monitor(
     session: Session,
     settings: Settings,
@@ -89,6 +99,7 @@ def run_fresh_monitor(
 
     profile = get_profile(session)
     digest_queue: dict[int, tuple[JobOffer, str | None]] = {}
+    notify_after_each_source = getattr(settings, "notify_after_each_source", False)
     for source in sources:
         if is_source_paused(source, now=datetime.now(UTC)):
             logs.append(_build_paused_source_log(source))
@@ -101,7 +112,20 @@ def run_fresh_monitor(
             stats = SourceRunStats(portal=source.portal, source_id=source.id, found=len(jobs))
             processed_offer_ids: set[int] = set()
             queued_offer_ids: set[int] = set()
+            source_digest_queue: dict[int, tuple[JobOffer, str | None]] = {}
             for job in jobs:
+                application_review = analyze_linkedin_application_type_for_discard(job, settings)
+                if application_review is not None:
+                    upsert_discarded_job(
+                        session,
+                        portal=source.portal,
+                        source_id=source.id,
+                        target_role=source.target_role,
+                        source_url=source.search_url,
+                        review=application_review,
+                    )
+                    stats.discarded += 1
+                    continue
                 discarded_review = analyze_scraped_job_for_discard(
                     job,
                     target_role=source.target_role,
@@ -124,14 +148,26 @@ def run_fresh_monitor(
                 if ingested.created:
                     stats.created += 1
                     if _should_notify_offer(ingested.offer, job, settings):
-                        _queue_digest_offer(digest_queue, ingested.offer, source.target_role)
+                        _queue_offer_for_cycle(
+                            digest_queue,
+                            source_digest_queue,
+                            ingested.offer,
+                            source.target_role,
+                            notify_after_each_source=notify_after_each_source,
+                        )
                         if ingested.offer.id is not None:
                             queued_offer_ids.add(ingested.offer.id)
                 else:
                     stats.duplicates += 1
                     if _is_pending_alert_offer(ingested.offer, settings):
                         stats.pending_alerts += 1
-                        _queue_digest_offer(digest_queue, ingested.offer, source.target_role)
+                        _queue_offer_for_cycle(
+                            digest_queue,
+                            source_digest_queue,
+                            ingested.offer,
+                            source.target_role,
+                            notify_after_each_source=notify_after_each_source,
+                        )
                         if ingested.offer.id is not None:
                             queued_offer_ids.add(ingested.offer.id)
 
@@ -144,8 +180,16 @@ def run_fresh_monitor(
                 for offer in pending_offers:
                     if offer.id in processed_offer_ids:
                         continue
+                    if not _offer_passes_linkedin_application_filter(offer, settings):
+                        continue
                     stats.pending_alerts += 1
-                    _queue_digest_offer(digest_queue, offer, source.target_role)
+                    _queue_offer_for_cycle(
+                        digest_queue,
+                        source_digest_queue,
+                        offer,
+                        source.target_role,
+                        notify_after_each_source=notify_after_each_source,
+                    )
                     if offer.id is not None:
                         queued_offer_ids.add(offer.id)
                         stats.retried_alerts += 1
@@ -157,6 +201,16 @@ def run_fresh_monitor(
                 f"duplicados={stats.duplicates} descartadas={stats.discarded} pending_alerts={stats.pending_alerts} "
                 f"queued_alerts={stats.queued_alerts}"
             )
+            if notify_after_each_source:
+                immediate_logs, outcome = _send_immediate_digest_for_source(
+                    session,
+                    settings,
+                    source_digest_queue,
+                    source_id=source.id,
+                )
+                logs.extend(immediate_logs)
+                if not outcome.sent:
+                    _remove_digest_queue_items(digest_queue, outcome.attempted_offer_ids)
         except (CaptchaRequiredError, LoginRequiredError, SourceBlockedError) as exc:
             failed_source = record_source_failure(session, source, error=str(exc), failed_at=checked_at)
             if failed_source.paused_until is not None:
@@ -170,7 +224,10 @@ def run_fresh_monitor(
             update_source_check(session, source, checked_at=checked_at, error=str(exc))
             logs.append(f"[{source.portal}] Error: {exc}")
 
-    logs.extend(_send_digest_for_cycle(session, settings, digest_queue))
+    if notify_after_each_source:
+        logs.extend(_send_final_digest_after_immediate(session, settings, digest_queue))
+    else:
+        logs.extend(_send_digest_for_cycle(session, settings, digest_queue))
     return logs
 
 
@@ -266,6 +323,7 @@ def _ingest_scraped_job(
         published_at=job.published_at,
         found_at=job.found_at,
         raw_posted_text=job.raw_posted_text,
+        application_type=job.application_type,
         normalized_url=normalized_url,
         url_hash=url_hash,
         source_id=source.id,
@@ -296,9 +354,56 @@ def _send_digest_for_cycle(
     settings: Settings,
     digest_queue: dict[int, tuple[JobOffer, str | None]],
 ) -> list[str]:
-    if not digest_queue:
+    outcome = _send_digest_queue(session, settings, digest_queue)
+    if not outcome.attempted_offer_ids:
         return []
-    queue_items = list(digest_queue.values())
+    if outcome.sent:
+        if outcome.message.casefold().startswith("digest enviado con "):
+            return [f"[telegram] {outcome.message[:1].lower()}{outcome.message[1:]}"]
+        return [f"[telegram] digest enviado con {len(outcome.delivered_offer_ids)} ofertas"]
+    return [f"[telegram] {outcome.message}"]
+
+
+def _send_immediate_digest_for_source(
+    session: Session,
+    settings: Settings,
+    digest_queue: dict[int, tuple[JobOffer, str | None]],
+    *,
+    source_id: int,
+) -> tuple[list[str], DigestSendOutcome]:
+    outcome = _send_digest_queue(session, settings, digest_queue)
+    if not outcome.attempted_offer_ids:
+        return [f"[telegram] sin ofertas nuevas para fuente {source_id}"], outcome
+    if outcome.sent:
+        return [f"[telegram] envío inmediato con {len(outcome.delivered_offer_ids)} ofertas desde fuente {source_id}"], outcome
+    return [f"[telegram] fallo envio inmediato para fuente {source_id}: {outcome.message}"], outcome
+
+
+def _send_final_digest_after_immediate(
+    session: Session,
+    settings: Settings,
+    digest_queue: dict[int, tuple[JobOffer, str | None]],
+) -> list[str]:
+    if not _get_notifiable_queue_items(digest_queue, settings):
+        return ["[telegram] no hay pendientes al final del ciclo"]
+    return _send_digest_for_cycle(session, settings, digest_queue)
+
+
+def _send_digest_queue(
+    session: Session,
+    settings: Settings,
+    digest_queue: dict[int, tuple[JobOffer, str | None]],
+) -> DigestSendOutcome:
+    if not digest_queue:
+        return DigestSendOutcome(set(), set(), False, "")
+    queue_items = _get_notifiable_queue_items(digest_queue, settings)
+    if not queue_items:
+        return DigestSendOutcome(set(), set(), False, "")
+    attempted_offer_ids = {
+        offer.id
+        for offer, _ in queue_items
+        if offer.id is not None
+    }
     offers = [offer for offer, _ in queue_items]
     sent, message, delivered_offers = send_job_alert_digest(offers, settings)
     delivered_ids = {offer.id for offer in delivered_offers if offer.id is not None}
@@ -307,11 +412,42 @@ def _send_digest_for_cycle(
         mark_offer_telegram_notified(session, offer, notified=delivered)
         status = "sent" if delivered else ("pending" if delivered_offers else "error")
         register_notification(session, offer, "telegram", status, message)
-    if sent:
-        if message.casefold().startswith("digest enviado con "):
-            return [f"[telegram] {message[:1].lower()}{message[1:]}"]
-        return [f"[telegram] digest enviado con {len(delivered_offers)} ofertas"]
-    return [f"[telegram] {message}"]
+    return DigestSendOutcome(attempted_offer_ids, delivered_ids, sent, message)
+
+
+def _get_notifiable_queue_items(
+    digest_queue: dict[int, tuple[JobOffer, str | None]],
+    settings: Settings,
+) -> list[tuple[JobOffer, str | None]]:
+    if not digest_queue:
+        return []
+    queue_items = [
+        (offer, target_role)
+        for offer, target_role in digest_queue.values()
+        if not offer.telegram_notified and _offer_passes_linkedin_application_filter(offer, settings)
+    ]
+    return queue_items
+
+
+def _remove_digest_queue_items(
+    digest_queue: dict[int, tuple[JobOffer, str | None]],
+    offer_ids: set[int],
+) -> None:
+    for offer_id in offer_ids:
+        digest_queue.pop(offer_id, None)
+
+
+def _queue_offer_for_cycle(
+    cycle_digest_queue: dict[int, tuple[JobOffer, str | None]],
+    source_digest_queue: dict[int, tuple[JobOffer, str | None]],
+    offer: JobOffer,
+    target_role: str | None,
+    *,
+    notify_after_each_source: bool,
+) -> None:
+    if notify_after_each_source:
+        _queue_digest_offer(source_digest_queue, offer, target_role)
+    _queue_digest_offer(cycle_digest_queue, offer, target_role)
 
 
 def _queue_digest_offer(
@@ -325,11 +461,28 @@ def _queue_digest_offer(
 
 
 def _is_pending_alert_offer(offer: JobOffer, settings: Settings) -> bool:
-    return (not offer.telegram_notified) and offer.compatibility_score >= settings.match_threshold
+    return (
+        (not offer.telegram_notified)
+        and offer.compatibility_score >= settings.match_threshold
+        and _offer_passes_linkedin_application_filter(offer, settings)
+    )
 
 
 def _should_notify_offer(offer: JobOffer, job: ScrapedJob, settings: Settings) -> bool:
-    return (not offer.telegram_notified) and is_scraped_job_fresh(job) and offer.compatibility_score >= settings.match_threshold
+    return (
+        (not offer.telegram_notified)
+        and is_scraped_job_fresh(job)
+        and offer.compatibility_score >= settings.match_threshold
+        and _offer_passes_linkedin_application_filter(offer, settings)
+    )
+
+
+def _offer_passes_linkedin_application_filter(offer: JobOffer, settings: Settings) -> bool:
+    if not getattr(settings, "linkedin_only_easy_apply", False):
+        return True
+    if (offer.portal or "").casefold() != "linkedin_selenium":
+        return True
+    return offer.application_type == LINKEDIN_EASY_APPLY
 
 
 def _append_monitor_note(current: str, note: str) -> str:

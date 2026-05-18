@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import os
 
@@ -32,6 +32,9 @@ class Settings:
     selenium_user_data_dir: str = ""
     selenium_profile_directory: str = ""
     linkedin_fetch_details: bool = False
+    linkedin_only_easy_apply: bool = False
+    notify_after_each_source: bool = False
+    telegram_chat_ids: list[str] = field(default_factory=list)
 
 
 def load_settings() -> Settings:
@@ -39,11 +42,16 @@ def load_settings() -> Settings:
     db_path = Path(os.getenv("JOBOPS_DB_PATH", "./data/jobops.db"))
     templates_dir = Path("./templates")
     generated_dir = Path("./generated")
+    telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    telegram_chat_ids = _parse_telegram_chat_ids(
+        os.getenv("TELEGRAM_CHAT_IDS"),
+        fallback_chat_id=telegram_chat_id,
+    )
     return Settings(
         db_path=db_path,
         match_threshold=int(os.getenv("JOBOPS_MATCH_THRESHOLD", "65")),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
-        telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
+        telegram_chat_id=telegram_chat_id,
         gmail_email=os.getenv("GMAIL_EMAIL", "").strip(),
         gmail_app_password=os.getenv("GMAIL_APP_PASSWORD", "").strip(),
         scraper_timeout=int(os.getenv("JOBOPS_SCRAPER_TIMEOUT", "20")),
@@ -71,8 +79,22 @@ def load_settings() -> Settings:
         selenium_user_data_dir=os.getenv("JOBOPS_SELENIUM_USER_DATA_DIR", "").strip(),
         selenium_profile_directory=os.getenv("JOBOPS_SELENIUM_PROFILE_DIRECTORY", "").strip(),
         linkedin_fetch_details=_parse_bool(os.getenv("JOBOPS_LINKEDIN_FETCH_DETAILS", "false")),
+        linkedin_only_easy_apply=_parse_bool(os.getenv("JOBOPS_LINKEDIN_ONLY_EASY_APPLY", "false")),
+        notify_after_each_source=_parse_bool(os.getenv("JOBOPS_NOTIFY_AFTER_EACH_SOURCE", "false")),
+        telegram_chat_ids=telegram_chat_ids,
     )
 
 
 def _parse_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _parse_telegram_chat_ids(raw_chat_ids: str | None, *, fallback_chat_id: str) -> list[str]:
+    chat_ids = [
+        chat_id.strip()
+        for chat_id in (raw_chat_ids or "").split(",")
+        if chat_id.strip()
+    ]
+    if chat_ids:
+        return chat_ids
+    return [fallback_chat_id] if fallback_chat_id else []

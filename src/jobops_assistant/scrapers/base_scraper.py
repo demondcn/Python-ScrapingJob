@@ -11,6 +11,7 @@ from dateutil import parser as date_parser
 import requests
 
 from ..date_utils import parse_relative_posted_text
+from ..application_types import UNKNOWN_APPLICATION_TYPE
 from ..models import JobSearchSource
 from ..settings import Settings
 
@@ -48,6 +49,7 @@ class ScrapedJob:
     found_at: datetime
     raw_posted_text: str
     source_id: int | None = None
+    application_type: str = UNKNOWN_APPLICATION_TYPE
 
 
 @dataclass(slots=True)

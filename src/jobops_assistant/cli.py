@@ -415,6 +415,7 @@ def _handle_offer_show(args, session: Session, settings, session_factory) -> int
         "published_at",
         "found_at",
         "source_id",
+        "application_type",
     ):
         print(f"{key}: {getattr(offer, key)}")
     print("match_reason:")
@@ -557,6 +558,7 @@ def _handle_discarded_show(args, session: Session, settings, session_factory) ->
         "last_seen_at",
         "compatibility_score",
         "source_id",
+        "application_type",
     ):
         print(f"{key}: {getattr(record, key)}")
     print("discard_reasons:")

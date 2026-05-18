@@ -6,7 +6,11 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .discarded_job_service import DiscardedJobReview, analyze_scraped_job_for_discard
+from .discarded_job_service import (
+    DiscardedJobReview,
+    analyze_linkedin_application_type_for_discard,
+    analyze_scraped_job_for_discard,
+)
 from .models import JobSearchSource
 from .scrapers.base_scraper import ResponseDebugSnapshot, ScrapedJob
 from .scrapers.registry import get_scraper
@@ -234,11 +238,13 @@ def test_source(settings: Settings, source: JobSearchSource) -> SourceTestResult
         offers: list[ScrapedJob] = []
         discarded: list[DiscardedJobReview] = []
         for offer in raw_offers:
-            discarded_review = analyze_scraped_job_for_discard(
-                offer,
-                target_role=source.target_role,
-                profile=None,
-            )
+            discarded_review = analyze_linkedin_application_type_for_discard(offer, settings)
+            if discarded_review is None:
+                discarded_review = analyze_scraped_job_for_discard(
+                    offer,
+                    target_role=source.target_role,
+                    profile=None,
+                )
             if discarded_review is None:
                 offers.append(offer)
             else:

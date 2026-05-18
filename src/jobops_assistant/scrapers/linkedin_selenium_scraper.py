@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import re
 from time import sleep
+import unicodedata
 from urllib.parse import quote, urljoin
 
 from bs4 import Tag
 
+from ..application_types import EXTERNAL_APPLY, LINKEDIN_EASY_APPLY, UNKNOWN_APPLICATION_TYPE
 from .base_scraper import CaptchaRequiredError, LoginRequiredError, ScrapedJob, SourceBlockedError
 from .selenium_base import SeleniumJobScraper
 
@@ -56,6 +59,23 @@ WORKPLACE_TYPE_FILTERS = {
     "2": "2",
     "3": "3",
 }
+LINKEDIN_EASY_APPLY_SIGNALS = (
+    "solicitud sencilla",
+    "solicitud simple",
+    "solicitar facilmente",
+    "easy apply",
+    "easyapply",
+)
+LINKEDIN_EXTERNAL_APPLY_SIGNALS = (
+    "solicitar en el sitio web de la empresa",
+    "apply on company website",
+)
+LINKEDIN_GENERIC_APPLY_CONTROL_TEXTS = (
+    "solicitar",
+    "solicitar ahora",
+    "apply",
+    "apply now",
+)
 
 
 def close_linkedin_signin_modal(driver, *, attempts: int = 2) -> bool:
@@ -257,6 +277,36 @@ def _map_filter_values(
     return mapped_values
 
 
+def _collect_application_text(node: Tag) -> str:
+    pieces = [node.get_text(" ", strip=True)]
+    for match in node.select("button, a, [role='button'], [aria-label], [title], [data-control-name]"):
+        pieces.append(_collect_control_text(match))
+    return " ".join(piece for piece in pieces if piece)
+
+
+def _collect_control_text(node: Tag) -> str:
+    pieces = [node.get_text(" ", strip=True)]
+    for attr in ("aria-label", "title", "data-control-name"):
+        value = node.get(attr)
+        if value:
+            pieces.append(" ".join(value) if isinstance(value, list) else str(value))
+    return " ".join(piece for piece in pieces if piece)
+
+
+def _normalize_application_text(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", value or "").strip().casefold()
+    normalized = unicodedata.normalize("NFKD", cleaned)
+    return "".join(char for char in normalized if not unicodedata.combining(char))
+
+
+def _has_easy_apply_signal(text: str) -> bool:
+    return any(signal in text for signal in LINKEDIN_EASY_APPLY_SIGNALS)
+
+
+def _has_external_apply_signal(text: str) -> bool:
+    return any(signal in text for signal in LINKEDIN_EXTERNAL_APPLY_SIGNALS)
+
+
 class LinkedInSeleniumJobScraper(SeleniumJobScraper):
     portal_name = "linkedin_selenium"
     blocked_error_message = LINKEDIN_BLOCKED_MESSAGE
@@ -356,6 +406,7 @@ class LinkedInSeleniumJobScraper(SeleniumJobScraper):
             location = self._first_text(card, self.location_selectors)
             raw_posted_text = self._first_text(card, self.posted_selectors)
             description = self._extract_card_description(card, location, raw_posted_text)
+            application_type = self._detect_application_type_from_node(card)
             results.append(
                 ScrapedJob(
                     title=title,
@@ -371,12 +422,20 @@ class LinkedInSeleniumJobScraper(SeleniumJobScraper):
                     found_at=datetime.now(UTC),
                     raw_posted_text=raw_posted_text,
                     source_id=source.id,
+                    application_type=application_type,
                 )
             )
         visible_detail = self._extract_detail_description(html)
         if visible_detail and results and not results[0].description:
             results[0].description = visible_detail
             results[0].modality = self._infer_modality(results[0].location, visible_detail)
+        visible_detail_application_type = self._detect_application_type_from_detail_panel(html)
+        if (
+            visible_detail_application_type != UNKNOWN_APPLICATION_TYPE
+            and results
+            and results[0].application_type == UNKNOWN_APPLICATION_TYPE
+        ):
+            results[0].application_type = visible_detail_application_type
         return results
 
     def fetch_job_detail(self, job: ScrapedJob, source) -> ScrapedJob:
@@ -393,6 +452,7 @@ class LinkedInSeleniumJobScraper(SeleniumJobScraper):
             html = getattr(driver, "page_source", "") or ""
             current_url = getattr(driver, "current_url", "") or job.url
             description = self._extract_detail_description(html)
+            application_type = self._detect_application_type_from_html(html)
             reason, _kind = self._detect_linkedin_block_reason(
                 html,
                 has_public_content=bool(description),
@@ -403,6 +463,8 @@ class LinkedInSeleniumJobScraper(SeleniumJobScraper):
                 return job
             if description:
                 job.description = description
+            if application_type != UNKNOWN_APPLICATION_TYPE:
+                job.application_type = application_type
         except Exception:
             return job
         finally:
@@ -496,6 +558,49 @@ class LinkedInSeleniumJobScraper(SeleniumJobScraper):
         if not description:
             return ""
         return self._clean_text(description.get_text(" ", strip=True))
+
+    def _detect_application_type_from_html(self, html: str) -> str:
+        return self._detect_application_type_from_node(self._soup(html))
+
+    def _detect_application_type_from_detail_panel(self, html: str) -> str:
+        soup = self._soup(html)
+        for selector in (
+            "div.jobs-search__job-details--container",
+            "div.jobs-details",
+            "div.jobs-details__main-content",
+            "div.job-details-jobs-unified-top-card",
+            "div.jobs-unified-top-card",
+            "section.top-card-layout",
+            "div.top-card-layout",
+        ):
+            panel = soup.select_one(selector)
+            if isinstance(panel, Tag):
+                application_type = self._detect_application_type_from_node(panel)
+                if application_type != UNKNOWN_APPLICATION_TYPE:
+                    return application_type
+        return UNKNOWN_APPLICATION_TYPE
+
+    def _detect_application_type_from_node(self, node: Tag) -> str:
+        text = _normalize_application_text(_collect_application_text(node))
+        if _has_easy_apply_signal(text):
+            return LINKEDIN_EASY_APPLY
+        if _has_external_apply_signal(text) or self._has_generic_external_apply_control(node):
+            return EXTERNAL_APPLY
+        return UNKNOWN_APPLICATION_TYPE
+
+    def _has_generic_external_apply_control(self, node: Tag) -> bool:
+        controls = node.select("button, a, [role='button']")
+        for control in controls:
+            control_text = _normalize_application_text(_collect_control_text(control))
+            if not control_text or _has_easy_apply_signal(control_text):
+                continue
+            if _has_external_apply_signal(control_text):
+                return True
+            if control_text in LINKEDIN_GENERIC_APPLY_CONTROL_TEXTS:
+                return True
+            if control_text.startswith("solicitar ") or control_text.startswith("apply "):
+                return True
+        return False
 
     def _detect_linkedin_block_reason(
         self,

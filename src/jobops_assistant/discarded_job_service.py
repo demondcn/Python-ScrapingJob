@@ -10,6 +10,11 @@ from pathlib import Path
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
+from .application_types import (
+    LINKEDIN_EASY_APPLY,
+    LINKEDIN_NOT_EASY_APPLY_REASON,
+    UNKNOWN_APPLICATION_TYPE,
+)
 from .matcher import analyze_relevance_for_target, calculate_match
 from .models import DiscardedJob, JobOffer
 from .scrapers.base_scraper import ScrapedJob
@@ -54,6 +59,17 @@ def analyze_scraped_job_for_discard(
     )
 
 
+def analyze_linkedin_application_type_for_discard(job: ScrapedJob, settings) -> DiscardedJobReview | None:
+    if not _scraped_job_requires_linkedin_easy_apply(job, settings):
+        return None
+    return DiscardedJobReview(
+        job=job,
+        reasons=[LINKEDIN_NOT_EASY_APPLY_REASON],
+        detected_keywords=[f"application_type={job.application_type or UNKNOWN_APPLICATION_TYPE}"],
+        preliminary_score=None,
+    )
+
+
 def build_offer_preview_from_scraped_job(job: ScrapedJob, *, source_id: int | None = None) -> JobOffer:
     normalized_url = job.url or ""
     return JobOffer(
@@ -67,6 +83,7 @@ def build_offer_preview_from_scraped_job(job: ScrapedJob, *, source_id: int | No
         description=job.description or "",
         requirements=job.requirements or "",
         raw_posted_text=job.raw_posted_text or "",
+        application_type=job.application_type or UNKNOWN_APPLICATION_TYPE,
         published_at=_ensure_utc(job.published_at),
         found_at=_ensure_utc(job.found_at),
         normalized_url=normalized_url,
@@ -89,6 +106,7 @@ def build_scraped_job_from_discarded(record: DiscardedJob) -> ScrapedJob:
         published_at=None,
         found_at=_ensure_utc(record.found_at) or datetime.now(UTC),
         raw_posted_text=record.raw_posted_text or "",
+        application_type=record.application_type or UNKNOWN_APPLICATION_TYPE,
         source_id=record.source_id,
     )
 
@@ -122,6 +140,7 @@ def upsert_discarded_job(
         existing.description = _pick_longer_text(existing.description, job.description)
         existing.requirements = _pick_longer_text(existing.requirements, job.requirements)
         existing.raw_posted_text = _pick_longer_text(existing.raw_posted_text, job.raw_posted_text)
+        existing.application_type = _pick_application_type(existing.application_type, job.application_type)
         existing.compatibility_score = (
             float(review.preliminary_score)
             if review.preliminary_score is not None
@@ -152,6 +171,7 @@ def upsert_discarded_job(
         description=job.description or "",
         requirements=job.requirements or "",
         raw_posted_text=job.raw_posted_text or "",
+        application_type=job.application_type or UNKNOWN_APPLICATION_TYPE,
         compatibility_score=float(review.preliminary_score) if review.preliminary_score is not None else None,
         discard_reasons=reasons_json,
         detected_keywords=keywords_json,
@@ -266,6 +286,7 @@ def export_discarded_jobs(
             "url",
             "discard_reasons",
             "detected_keywords",
+            "application_type",
             "found_at",
             "seen_count",
         ]
@@ -335,6 +356,7 @@ def reprocess_discarded_jobs(
             requirements=record.requirements,
             found_at=_ensure_utc(record.found_at),
             raw_posted_text=record.raw_posted_text,
+            application_type=record.application_type or UNKNOWN_APPLICATION_TYPE,
             normalized_url=record.normalized_url or record.url,
             url_hash=record.url_hash,
             source_id=record.source_id,
@@ -401,6 +423,7 @@ def _build_export_row(record: DiscardedJob) -> dict[str, object]:
         "url": record.normalized_url or record.url,
         "discard_reasons": "; ".join(parse_text_list(record.discard_reasons)),
         "detected_keywords": "; ".join(parse_text_list(record.detected_keywords)),
+        "application_type": record.application_type or UNKNOWN_APPLICATION_TYPE,
         "found_at": _json_default(record.found_at),
         "seen_count": record.seen_count,
     }
@@ -412,6 +435,18 @@ def _pick_longer_text(primary: str, secondary: str) -> str:
     if not secondary:
         return primary
     return primary if len(primary) >= len(secondary) else secondary
+
+
+def _pick_application_type(primary: str, secondary: str) -> str:
+    if not primary or primary == UNKNOWN_APPLICATION_TYPE:
+        return secondary or UNKNOWN_APPLICATION_TYPE
+    return primary
+
+
+def _scraped_job_requires_linkedin_easy_apply(job: ScrapedJob, settings) -> bool:
+    if not getattr(settings, "linkedin_only_easy_apply", False):
+        return False
+    return (job.portal or "").casefold() == "linkedin_selenium" and job.application_type != LINKEDIN_EASY_APPLY
 
 
 def _ensure_utc(dt: datetime | None) -> datetime | None:

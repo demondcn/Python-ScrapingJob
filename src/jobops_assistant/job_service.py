@@ -6,6 +6,7 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from .application_types import UNKNOWN_APPLICATION_TYPE
 from .matcher import calculate_match
 from .models import CandidateProfile, GeneratedDocument, JobOffer, JobSeenHash, Notification
 
@@ -26,6 +27,7 @@ def create_offer(
     published_at: datetime | None = None,
     found_at: datetime | None = None,
     raw_posted_text: str = "",
+    application_type: str = UNKNOWN_APPLICATION_TYPE,
     normalized_url: str = "",
     url_hash: str = "",
     source_id: int | None = None,
@@ -48,6 +50,7 @@ def create_offer(
             published_at=published_at,
             found_at=found_at,
             raw_posted_text=raw_posted_text,
+            application_type=application_type,
             normalized_url=normalized_url,
             url_hash=url_hash,
             source_id=source_id,
@@ -67,6 +70,7 @@ def create_offer(
         published_at=published_at,
         found_at=found_at or datetime.now(UTC),
         raw_posted_text=raw_posted_text,
+        application_type=application_type,
         normalized_url=normalized_url or url,
         url_hash=url_hash,
         source_id=source_id,
@@ -95,6 +99,7 @@ def create_offer(
             published_at=published_at,
             found_at=found_at,
             raw_posted_text=raw_posted_text,
+            application_type=application_type,
             normalized_url=normalized_url,
             url_hash=url_hash,
             source_id=source_id,
@@ -265,6 +270,7 @@ def _merge_offer_fields(
     published_at: datetime | None,
     found_at: datetime | None,
     raw_posted_text: str,
+    application_type: str,
     normalized_url: str,
     url_hash: str,
     source_id: int | None,
@@ -278,6 +284,7 @@ def _merge_offer_fields(
     offer.requirements = _pick_longer_text(offer.requirements, requirements)
     offer.notes = _merge_notes(offer.notes, notes)
     offer.raw_posted_text = _pick_longer_text(offer.raw_posted_text, raw_posted_text)
+    offer.application_type = _pick_application_type(offer.application_type, application_type)
     offer.normalized_url = offer.normalized_url or normalized_url or offer.url
     offer.url_hash = offer.url_hash or url_hash
     offer.source_id = offer.source_id or source_id
@@ -306,3 +313,9 @@ def _merge_notes(primary: str, secondary: str) -> str:
     if secondary in primary:
         return primary
     return f"{primary}\n{secondary}".strip()
+
+
+def _pick_application_type(primary: str, secondary: str) -> str:
+    if not primary or primary == UNKNOWN_APPLICATION_TYPE:
+        return secondary or UNKNOWN_APPLICATION_TYPE
+    return primary

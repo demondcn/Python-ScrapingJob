@@ -5,6 +5,7 @@ from types import ModuleType
 
 import pytest
 
+from src.jobops_assistant.application_types import EXTERNAL_APPLY, LINKEDIN_EASY_APPLY, UNKNOWN_APPLICATION_TYPE
 from src.jobops_assistant import cli as cli_module
 from src.jobops_assistant.cli import _handle_selenium_test
 from src.jobops_assistant.models import JobSearchSource
@@ -375,6 +376,81 @@ def test_linkedin_selenium_extracts_public_cards(tmp_path: Path):
     assert jobs[0].raw_posted_text == "Hace 2 horas"
     assert jobs[0].portal == "linkedin_selenium"
     assert jobs[0].url == "https://www.linkedin.com/jobs/view/123"
+
+
+def test_linkedin_selenium_detects_spanish_easy_apply_from_card(tmp_path: Path):
+    html = """
+    <div class="base-card base-search-card">
+      <h3 class="base-search-card__title">Backend Junior</h3>
+      <h4 class="base-search-card__subtitle">Acme API</h4>
+      <span class="job-search-card__location">Colombia</span>
+      <span>Solicitud sencilla</span>
+      <a class="base-card__full-link" href="https://www.linkedin.com/jobs/view/124?trk=public_jobs">Ver</a>
+    </div>
+    """
+    driver = _FakeDriver(html)
+    scraper = LinkedInSeleniumJobScraper(_settings(tmp_path), driver_factory=lambda: driver)
+
+    jobs = scraper.scrape(_source("linkedin_selenium", "https://www.linkedin.com/jobs/search/?keywords=backend"))
+
+    assert len(jobs) == 1
+    assert jobs[0].application_type == LINKEDIN_EASY_APPLY
+
+
+def test_linkedin_selenium_detects_english_easy_apply_from_card(tmp_path: Path):
+    html = """
+    <div class="base-card base-search-card">
+      <h3 class="base-search-card__title">Backend Junior</h3>
+      <h4 class="base-search-card__subtitle">Acme API</h4>
+      <span class="job-search-card__location">Colombia</span>
+      <button aria-label="Easy Apply to Backend Junior">Easy Apply</button>
+      <a class="base-card__full-link" href="https://www.linkedin.com/jobs/view/125?trk=public_jobs">Ver</a>
+    </div>
+    """
+    driver = _FakeDriver(html)
+    scraper = LinkedInSeleniumJobScraper(_settings(tmp_path), driver_factory=lambda: driver)
+
+    jobs = scraper.scrape(_source("linkedin_selenium", "https://www.linkedin.com/jobs/search/?keywords=backend"))
+
+    assert len(jobs) == 1
+    assert jobs[0].application_type == LINKEDIN_EASY_APPLY
+
+
+def test_linkedin_selenium_detects_external_apply_from_company_website_button(tmp_path: Path):
+    html = """
+    <div class="base-card base-search-card">
+      <h3 class="base-search-card__title">Backend Junior</h3>
+      <h4 class="base-search-card__subtitle">Acme API</h4>
+      <span class="job-search-card__location">Colombia</span>
+      <button>Solicitar en el sitio web de la empresa</button>
+      <a class="base-card__full-link" href="https://www.linkedin.com/jobs/view/126?trk=public_jobs">Ver</a>
+    </div>
+    """
+    driver = _FakeDriver(html)
+    scraper = LinkedInSeleniumJobScraper(_settings(tmp_path), driver_factory=lambda: driver)
+
+    jobs = scraper.scrape(_source("linkedin_selenium", "https://www.linkedin.com/jobs/search/?keywords=backend"))
+
+    assert len(jobs) == 1
+    assert jobs[0].application_type == EXTERNAL_APPLY
+
+
+def test_linkedin_selenium_marks_application_type_unknown_without_apply_signal(tmp_path: Path):
+    html = """
+    <div class="base-card base-search-card">
+      <h3 class="base-search-card__title">Backend Junior</h3>
+      <h4 class="base-search-card__subtitle">Acme API</h4>
+      <span class="job-search-card__location">Colombia</span>
+      <a class="base-card__full-link" href="https://www.linkedin.com/jobs/view/127?trk=public_jobs">Ver</a>
+    </div>
+    """
+    driver = _FakeDriver(html)
+    scraper = LinkedInSeleniumJobScraper(_settings(tmp_path), driver_factory=lambda: driver)
+
+    jobs = scraper.scrape(_source("linkedin_selenium", "https://www.linkedin.com/jobs/search/?keywords=backend"))
+
+    assert len(jobs) == 1
+    assert jobs[0].application_type == UNKNOWN_APPLICATION_TYPE
 
 
 def test_linkedin_logged_in_list_item_extracts_job(tmp_path: Path, capsys):

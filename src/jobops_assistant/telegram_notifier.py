@@ -1,13 +1,38 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+import logging
 import re
 from datetime import UTC, datetime
 
 import requests
 
+from .application_types import LINKEDIN_EASY_APPLY, LINKEDIN_EASY_APPLY_LABEL
 from .date_utils import format_datetime_for_message, get_detection_display, get_publication_display
 from .models import JobOffer, Notification
 from .settings import Settings
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class TelegramDeliveryResult:
+    total_chat_ids: int
+    delivered_chat_ids: list[str]
+    failed_chat_errors: dict[str, str]
+
+
+class TelegramDeliveryError(RuntimeError):
+    def __init__(self, result: TelegramDeliveryResult) -> None:
+        self.result = result
+        details = "; ".join(
+            f"{chat_id}: {error}"
+            for chat_id, error in result.failed_chat_errors.items()
+        )
+        message = "fallo en todos los chats, se deja pendiente"
+        if details:
+            message = f"{message}: {details}"
+        super().__init__(message)
 
 
 def format_job_alert(
@@ -40,6 +65,9 @@ def format_job_alert(
         "",
         "Motivo:",
     ]
+    application_type_lines = _build_application_type_lines(offer)
+    if application_type_lines:
+        lines[5:5] = application_type_lines
     lines.extend(_build_reason_lines(offer))
     lines.extend(["", "Link para aplicar:", offer.url])
     if suggested_target and offer.id is not None:
@@ -57,16 +85,19 @@ def format_job_alert(
 
 
 def send_job_alert(settings: Settings, offer: JobOffer, *, target_role: str | None = None) -> tuple[bool, str]:
-    if not settings.telegram_bot_token or not settings.telegram_chat_id:
+    if not settings.telegram_bot_token or not _get_telegram_chat_ids(settings):
         return False, "Credenciales de Telegram incompletas; no se envio notificacion."
-    _post_telegram_message(
-        settings,
-        format_job_alert(
-            offer,
-            target_role=target_role,
-            timezone_name=settings.timezone_name,
-        ),
-    )
+    try:
+        _post_telegram_message(
+            settings,
+            format_job_alert(
+                offer,
+                target_role=target_role,
+                timezone_name=settings.timezone_name,
+            ),
+        )
+    except Exception as exc:
+        return False, f"Error enviando Telegram: {exc}"
     return True, "Alerta enviada por Telegram."
 
 
@@ -78,7 +109,7 @@ def send_job_alert_digest(
 ) -> tuple[bool, str, list[JobOffer]]:
     if not jobs:
         return False, "No hay ofertas para enviar en el digest.", []
-    if not settings.telegram_bot_token or not settings.telegram_chat_id:
+    if not settings.telegram_bot_token or not _get_telegram_chat_ids(settings):
         return False, "Credenciales de Telegram incompletas; no se envio notificacion.", []
 
     limited_jobs, additional_count = _limit_digest_jobs(jobs, settings.telegram_digest_max_jobs)
@@ -247,6 +278,9 @@ def _format_digest_entry(index: int, offer: JobOffer, settings: Settings) -> str
         f"Detectada por JobOps: {detection_line}",
         f"Link: {offer.url}",
     ]
+    application_type_lines = _build_application_type_lines(offer)
+    if application_type_lines:
+        lines[3:3] = application_type_lines
     if offer.id is not None:
         lines.extend(
             [
@@ -269,6 +303,12 @@ def _limit_digest_jobs(jobs: list[JobOffer], max_jobs: int) -> tuple[list[JobOff
     return limited, max(0, len(ordered) - len(limited))
 
 
+def _build_application_type_lines(offer: JobOffer) -> list[str]:
+    if offer.application_type == LINKEDIN_EASY_APPLY:
+        return [f"Tipo de solicitud: {LINKEDIN_EASY_APPLY_LABEL}"]
+    return []
+
+
 def _sort_digest_jobs(jobs: list[JobOffer]) -> list[JobOffer]:
     return sorted(
         jobs,
@@ -280,17 +320,76 @@ def _sort_digest_jobs(jobs: list[JobOffer]) -> list[JobOffer]:
     )
 
 
-def _post_telegram_message(settings: Settings, message: str) -> None:
+def _post_telegram_message(settings: Settings, message: str) -> TelegramDeliveryResult:
+    chat_ids = _get_telegram_chat_ids(settings)
+    delivered_chat_ids: list[str] = []
+    failed_chat_errors: dict[str, str] = {}
+
+    for chat_id in chat_ids:
+        try:
+            _post_telegram_message_to_chat(settings, message, chat_id)
+        except Exception as exc:
+            error = _format_telegram_error(exc, settings)
+            failed_chat_errors[chat_id] = error
+            logger.error("[telegram] error enviando a chat_id=%s: %s", chat_id, error)
+            continue
+        delivered_chat_ids.append(chat_id)
+        logger.info("[telegram] enviado a chat_id=%s", chat_id)
+
+    result = TelegramDeliveryResult(
+        total_chat_ids=len(chat_ids),
+        delivered_chat_ids=delivered_chat_ids,
+        failed_chat_errors=failed_chat_errors,
+    )
+    _log_telegram_delivery_summary(result)
+    if not delivered_chat_ids:
+        raise TelegramDeliveryError(result)
+    return result
+
+
+def _post_telegram_message_to_chat(settings: Settings, message: str, chat_id: str) -> None:
     url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
     response = requests.post(
         url,
         json={
-            "chat_id": settings.telegram_chat_id,
+            "chat_id": chat_id,
             "text": message,
         },
         timeout=15,
     )
     response.raise_for_status()
+
+
+def _get_telegram_chat_ids(settings: Settings) -> list[str]:
+    configured_chat_ids = [
+        str(chat_id).strip()
+        for chat_id in getattr(settings, "telegram_chat_ids", [])
+        if str(chat_id).strip()
+    ]
+    if configured_chat_ids:
+        return configured_chat_ids
+
+    chat_id = str(getattr(settings, "telegram_chat_id", "")).strip()
+    return [chat_id] if chat_id else []
+
+
+def _log_telegram_delivery_summary(result: TelegramDeliveryResult) -> None:
+    delivered_count = len(result.delivered_chat_ids)
+    total_count = result.total_chat_ids
+    if total_count > 0 and delivered_count == total_count:
+        logger.info("[telegram] enviado a %s/%s chats", delivered_count, total_count)
+    elif delivered_count > 0:
+        logger.warning("[telegram] enviado a %s/%s chats con errores", delivered_count, total_count)
+    else:
+        logger.error("[telegram] fallo en todos los chats, se deja pendiente")
+
+
+def _format_telegram_error(exc: Exception, settings: Settings) -> str:
+    message = str(exc)
+    token = getattr(settings, "telegram_bot_token", "")
+    if token:
+        message = message.replace(token, "<redacted>")
+    return message
 
 
 def ensure_datetime(value: datetime | None) -> datetime:

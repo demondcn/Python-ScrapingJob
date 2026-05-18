@@ -70,6 +70,7 @@ Variables principales en `.env`:
 - `JOBOPS_TIMEZONE`: zona horaria para mensajes y fechas
 - `JOBOPS_TELEGRAM_DIGEST_LIMIT`: maximo de ofertas por digest; `0` envia todas las ofertas pendientes
 - `JOBOPS_TELEGRAM_MAX_MESSAGE_CHARS`: limite aproximado por parte del digest
+- `JOBOPS_NOTIFY_AFTER_EACH_SOURCE`: si esta en `true`, envia Telegram despues de cada fuente y no espera al final del ciclo
 - `JOBOPS_ENABLE_SELENIUM`: activa scrapers opcionales con Selenium
 - `JOBOPS_SELENIUM_HEADLESS`: ejecuta el navegador Selenium sin ventana visible
 - `JOBOPS_SELENIUM_PAGE_LOAD_TIMEOUT`: timeout de carga de pagina Selenium
@@ -78,6 +79,7 @@ Variables principales en `.env`:
 - `JOBOPS_SELENIUM_USER_DATA_DIR`: perfil local de Chrome que Selenium debe reutilizar
 - `JOBOPS_SELENIUM_PROFILE_DIRECTORY`: carpeta del perfil de Chrome, por ejemplo `Default`
 - `JOBOPS_LINKEDIN_FETCH_DETAILS`: intenta abrir cada oferta publica de LinkedIn para leer `div.description__text` (default `false`)
+- `JOBOPS_LINKEDIN_ONLY_EASY_APPLY`: si esta en `true`, `linkedin_selenium` solo guarda y notifica vacantes con solicitud sencilla
 - `TELEGRAM_BOT_TOKEN`: token del bot
 - `TELEGRAM_CHAT_ID`: chat id destino
 - `GMAIL_EMAIL`: correo para IMAP
@@ -287,6 +289,7 @@ Comportamiento:
 - Guarda ofertas nuevas en SQLite
 - Calcula compatibilidad con el matcher existente
 - Si la oferta supera `JOBOPS_MATCH_THRESHOLD`, la agrega al digest del ciclo y envia un resumen agrupado por Telegram con link oficial y comandos sugeridos para CV ATS y cambio de estado
+- Con `JOBOPS_NOTIFY_AFTER_EACH_SOURCE=true`, cada fuente envia su propio digest inmediatamente al terminar; el digest final solo procesa pendientes que no se enviaron en esos envios por fuente.
 - `Duplicado` significa que la oferta ya estaba guardada; no que la alerta quede descartada
 - Si una oferta supera el umbral pero no fue enviada por Telegram, queda como pendiente de alerta y puede reintentarse despues
 - `offer clear` borra ofertas, hashes vistos y registros relacionados, pero conserva las fuentes configuradas
@@ -306,6 +309,7 @@ JOBOPS_SELENIUM_MAX_SCROLLS=5
 JOBOPS_SELENIUM_USER_DATA_DIR=%LOCALAPPDATA%/Google/Chrome/User Data
 JOBOPS_SELENIUM_PROFILE_DIRECTORY=Default
 JOBOPS_LINKEDIN_FETCH_DETAILS=false
+JOBOPS_LINKEDIN_ONLY_EASY_APPLY=true
 ```
 
 Comandos de prueba:
@@ -330,6 +334,7 @@ Reglas de uso:
 - No automatiza login, no usa proxies y no resuelve captchas; si configuras un perfil de Chrome, reutiliza la sesion/cookies locales de ese perfil.
 - Para reutilizar una sesion ya abierta en Chrome, ejecuta Selenium con `JOBOPS_SELENIUM_HEADLESS=false`, `JOBOPS_SELENIUM_USER_DATA_DIR` apuntando al `User Data` local de Chrome y `JOBOPS_SELENIUM_PROFILE_DIRECTORY=Default` o el perfil que corresponda.
 - LinkedIn usa Selenium para abrir la busqueda publica, hacer scroll limitado, pulsar el boton publico de mas resultados cuando aparece y parsear cards `div.base-card` con BeautifulSoup.
+- Con `JOBOPS_LINKEDIN_ONLY_EASY_APPLY=true`, `linkedin_selenium` descarta las ofertas que no muestren "Solicitud sencilla", "Solicitud simple", "Solicitar facilmente" o "Easy Apply"; esas ofertas van a `discarded_jobs` con la razon `no es solicitud sencilla de LinkedIn`.
 - Los filtros del constructor de URL de LinkedIn mapean `24h` a `f_TPR=r86400`, `entry_level` a `f_E=2`, y `remote` + `hybrid` a `f_WT=2,3`.
 - Si aparece Security Check, captcha, login, authwall, checkpoint, access denied o forbidden, registra el bloqueo y omite la fuente.
 - Puede ser mas lento que los scrapers con `requests`; para fuentes Selenium se recomienda intervalo minimo de 30 minutos.
