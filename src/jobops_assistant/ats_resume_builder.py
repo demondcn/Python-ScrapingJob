@@ -33,6 +33,30 @@ TARGET_KEYWORDS: dict[str, list[str]] = {
         "aplicaciones web",
         "sql",
     ],
+    "soporte_ti_junior": [
+        "soporte ti",
+        "soporte tecnico",
+        "mesa de ayuda",
+        "help desk",
+        "service desk",
+        "usuarios",
+        "windows",
+        "office",
+        "directorio activo",
+        "redes",
+    ],
+    "hardware_support_junior": [
+        "hardware",
+        "mantenimiento",
+        "equipos",
+        "impresoras",
+        "cableado",
+        "configuracion",
+        "windows",
+        "office",
+        "redes",
+        "soporte tecnico",
+    ],
     "infraestructura_junior": [
         "soporte",
         "mantenimiento",
@@ -109,6 +133,14 @@ TARGET_SUMMARIES: dict[str, str] = {
         "Tecnólogo en Desarrollo de Software con experiencia práctica en soporte técnico, desarrollo web, "
         "bases de datos y documentación. Con capacidad para diagnosticar incidencias, apoyar usuarios, revisar "
         "aplicaciones, generar reportes y colaborar en la mejora de procesos tecnológicos."
+    ),
+    "soporte_ti_junior": (
+        "Tecnologo en Desarrollo de Software con experiencia practica en soporte tecnico a usuarios, mesa de "
+        "ayuda, diagnostico de incidencias, configuracion de equipos, Windows, Office y documentacion operativa."
+    ),
+    "hardware_support_junior": (
+        "Tecnologo en Desarrollo de Software con experiencia practica en soporte de hardware y software, "
+        "mantenimiento de equipos, configuracion de estaciones de trabajo, redes basicas e inventario tecnologico."
     ),
     "infraestructura_junior": (
         "Tecnólogo en Desarrollo de Software con experiencia en soporte operativo, trabajo con centros de "

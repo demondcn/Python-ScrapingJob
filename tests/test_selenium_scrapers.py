@@ -3,13 +3,16 @@ from pathlib import Path
 import sys
 from types import ModuleType
 
+from bs4 import BeautifulSoup
 import pytest
 
 from src.jobops_assistant.application_types import EXTERNAL_APPLY, LINKEDIN_EASY_APPLY, UNKNOWN_APPLICATION_TYPE
 from src.jobops_assistant import cli as cli_module
 from src.jobops_assistant.cli import _handle_selenium_test
+from src.jobops_assistant.linkedin_url import build_linkedin_url
 from src.jobops_assistant.models import JobSearchSource
 from src.jobops_assistant.scrapers.base_scraper import CaptchaRequiredError, LoginRequiredError, SourceBlockedError
+from src.jobops_assistant.scrapers.computrabajo_scraper import ComputrabajoJobScraper
 from src.jobops_assistant.scrapers.indeed_selenium_scraper import IndeedSeleniumJobScraper
 from src.jobops_assistant.scrapers.linkedin_selenium_scraper import (
     LINKEDIN_AUTHWALL_WITHOUT_CARDS_MESSAGE,
@@ -96,6 +99,36 @@ class _FakeDriver:
 
     def quit(self) -> None:
         self.quit_called = True
+
+    def find_elements(self, by, selector: str):
+        try:
+            return [object() for _ in BeautifulSoup(self.page_source or "", "html.parser").select(selector)]
+        except Exception:
+            return []
+
+
+class _MappedDriver(_FakeDriver):
+    def __init__(self, pages: dict[str, object], *, current_url: str = "chrome://new-tab-page/") -> None:
+        super().__init__("", current_url=current_url)
+        self.pages = pages
+
+    def get(self, url: str) -> None:
+        self.visited_urls.append(url)
+        payload = self.pages.get(url)
+        if payload is None:
+            raise AssertionError(f"URL inesperada en test: {url}")
+        if isinstance(payload, list):
+            if not payload:
+                raise AssertionError(f"Sin respuestas restantes para URL en test: {url}")
+            payload = payload.pop(0)
+        if isinstance(payload, Exception):
+            raise payload
+        if isinstance(payload, dict):
+            self.page_source = str(payload.get("html", "") or "")
+            self.current_url = str(payload.get("current_url", "") or url)
+            return
+        self.page_source = str(payload or "")
+        self.current_url = url
 
 
 class _FakeButton:
@@ -240,12 +273,13 @@ def test_selenium_scraper_with_profile_navigates_to_source_url(tmp_path: Path, c
         driver_factory=lambda: driver,
     )
 
+    expected_url = f"{source_url}&f_AL=true&sortBy=DD"
     jobs = scraper.scrape(_source("linkedin_selenium", source_url))
 
     output = capsys.readouterr().out
-    assert driver.visited_urls == [source_url]
-    assert f"Selenium: navegando a URL: {source_url}" in output
-    assert f"Selenium: current_url después de driver.get: {source_url}" in output
+    assert driver.visited_urls == [expected_url]
+    assert f"Selenium: navegando a URL: {expected_url}" in output
+    assert f"Selenium: current_url después de driver.get: {expected_url}" in output
     assert len(jobs) == 1
 
 
@@ -346,6 +380,95 @@ def test_indeed_selenium_security_check_is_reported_as_block(tmp_path: Path):
     snapshot = scraper.get_last_debug_snapshot()
     assert snapshot is not None
     assert snapshot.block_reason in {"security check", "captcha"}
+    assert driver.quit_called is True
+
+
+def test_computrabajo_selenium_loads_page(tmp_path: Path):
+    source_url = "https://computrabajo.example/jobs"
+    html = """
+    <article>
+      <h2><a href="/ofertas/1">Soporte de Aplicaciones Junior</a></h2>
+      <p class="fs16 fc_base mt5">ABC Tecnologia</p>
+    </article>
+    """
+    driver = _FakeDriver(html)
+    scraper = ComputrabajoJobScraper(_settings(tmp_path), driver_factory=lambda: driver)
+
+    rendered_html = scraper.fetch_search_results(_source("computrabajo", source_url))
+
+    assert "Soporte de Aplicaciones Junior" in rendered_html
+    assert driver.visited_urls == [source_url]
+    assert driver.quit_called is True
+
+
+def test_computrabajo_extract_jobs_from_rendered_html(tmp_path: Path):
+    source_url = "https://computrabajo.example/jobs"
+    detail_url = "https://computrabajo.example/ofertas/1"
+    driver = _MappedDriver(
+        {
+            source_url: """
+            <article>
+              <h2><a href="/ofertas/1?utm_source=test">Backend Junior</a></h2>
+              <p class="fs16 fc_base mt5">Acme Backend</p>
+              <p class="fs13 fc_aux mt15">Remoto</p>
+              <span class="fc_aux fs13">Publicada hoy</span>
+            </article>
+            """,
+            detail_url: """
+            <div class="box_detail">
+              <h1>Backend Junior</h1>
+              <div class="box_company"><h2>Acme Backend</h2></div>
+              <p class="fc_aux">Remoto</p>
+              <div class="mbB">Python, SQL y APIs.</div>
+            </div>
+            """,
+        }
+    )
+    scraper = ComputrabajoJobScraper(_settings(tmp_path), driver_factory=lambda: driver)
+
+    jobs = scraper.scrape(_source("computrabajo", source_url))
+
+    assert len(jobs) == 1
+    assert jobs[0].title == "Backend Junior"
+    assert jobs[0].company == "Acme Backend"
+    assert jobs[0].location == "Remoto"
+    assert jobs[0].description == "Python, SQL y APIs."
+    assert jobs[0].url == detail_url
+
+
+def test_no_false_block_on_selenium_failure(tmp_path: Path):
+    source_url = "https://computrabajo.example/jobs"
+    driver = _MappedDriver(
+        {
+            source_url: [TimeoutError("page load timeout"), TimeoutError("page load timeout")],
+        }
+    )
+    scraper = ComputrabajoJobScraper(_settings(tmp_path), driver_factory=lambda: driver)
+
+    jobs = scraper.scrape(_source("computrabajo", source_url))
+
+    snapshot = scraper.get_last_debug_snapshot()
+    assert jobs == []
+    assert snapshot is not None
+    assert "selenium" in snapshot.block_reason
+    assert driver.visited_urls == [source_url, source_url]
+    assert driver.quit_called is True
+
+
+def test_captcha_detected_marks_blocked(tmp_path: Path):
+    source_url = "https://computrabajo.example/jobs"
+    driver = _FakeDriver(
+        "<html><body><main><h1>Security Check</h1><p>captcha required</p></main></body></html>",
+        current_url=source_url,
+    )
+    scraper = ComputrabajoJobScraper(_settings(tmp_path), driver_factory=lambda: driver)
+
+    with pytest.raises(CaptchaRequiredError):
+        scraper.scrape(_source("computrabajo", source_url))
+
+    snapshot = scraper.get_last_debug_snapshot()
+    assert snapshot is not None
+    assert "captcha" in snapshot.block_reason or "security check" in snapshot.block_reason
     assert driver.quit_called is True
 
 
@@ -787,6 +910,57 @@ def test_linkedin_selenium_captcha_is_reported(tmp_path: Path):
     assert driver.quit_called is True
 
 
+def test_linkedin_url_adds_sortBy_DD():
+    url = build_linkedin_url(
+        "https://www.linkedin.com/jobs/search/?keywords=Backend%20Junior&location=Colombia",
+        "",
+        "",
+        "",
+    )
+
+    assert "sortBy=DD" in url
+    assert "f_AL=true" in url
+
+
+def test_linkedin_url_removes_currentJobId():
+    url = build_linkedin_url(
+        "https://www.linkedin.com/jobs/search/?keywords=Backend%20Junior&location=Colombia&currentJobId=123456",
+        "",
+        "",
+        "",
+    )
+
+    assert "currentJobId" not in url
+    assert "sortBy=DD" in url
+    assert "f_AL=true" in url
+
+
+def test_linkedin_url_replaces_sortBy_R():
+    url = build_linkedin_url(
+        "https://www.linkedin.com/jobs/search/?keywords=Backend%20Junior&location=Colombia&sortBy=R",
+        "",
+        "",
+        "",
+    )
+
+    assert "sortBy=R" not in url
+    assert "sortBy=DD" in url
+    assert "f_AL=true" in url
+
+
+def test_linkedin_url_keeps_f_TPR():
+    url = build_linkedin_url(
+        "https://www.linkedin.com/jobs/search/?keywords=Backend%20Junior&location=Colombia&f_TPR=r86400",
+        "",
+        "",
+        "",
+    )
+
+    assert "f_TPR=r86400" in url
+    assert "sortBy=DD" in url
+    assert "f_AL=true" in url
+
+
 def test_linkedin_jobs_url_builder_adds_supported_filters():
     url = build_linkedin_jobs_url(
         "DevOps Trainee",
@@ -802,6 +976,8 @@ def test_linkedin_jobs_url_builder_adds_supported_filters():
     assert "f_TPR=r86400" in url
     assert "f_E=2" in url
     assert "f_WT=2,3" in url
+    assert "f_AL=true" in url
+    assert "sortBy=DD" in url
 
 
 def test_linkedin_detail_block_keeps_basic_card(tmp_path: Path):
@@ -884,12 +1060,14 @@ def test_selenium_test_cli_builds_linkedin_url_when_url_is_missing(tmp_path: Pat
     assert "f_TPR=r86400" in output
     assert "f_E=2" in output
     assert "f_WT=2,3" in output
+    assert "f_AL=true" in output
+    assert "sortBy=DD" in output
 
 
 def test_selenium_test_cli_prints_linkedin_offers_when_cards_are_available(tmp_path: Path, capsys, monkeypatch):
     def _fake_test_source(settings, source):
         assert source.portal == "linkedin_selenium"
-        assert source.search_url == "https://www.linkedin.com/jobs/search/?keywords=backend"
+        assert source.search_url == "https://www.linkedin.com/jobs/search/?keywords=backend&f_AL=true&sortBy=DD"
         return Namespace(
             error="",
             offers=[

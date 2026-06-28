@@ -32,6 +32,7 @@ from .job_service import (
     update_offer_notes,
     update_offer_status,
 )
+from .linkedin_url import normalize_linkedin_source_url
 from .message_generator import generate_application_message
 from .models import JobSearchSource
 from .profile_service import get_profile, upsert_profile
@@ -881,7 +882,12 @@ def _normalize_selenium_portal(portal: str) -> str:
 def _resolve_selenium_test_url(args, portal: str) -> str:
     explicit_url = (getattr(args, "url", None) or "").strip()
     if explicit_url:
-        return explicit_url
+        return normalize_linkedin_source_url(
+            portal,
+            explicit_url,
+            keywords=getattr(args, "keyword", "") or "",
+            location=getattr(args, "location", "") or "",
+        )
     if portal != "linkedin_selenium":
         raise ValueError("Debes indicar --url para este portal.")
     return build_linkedin_jobs_url(

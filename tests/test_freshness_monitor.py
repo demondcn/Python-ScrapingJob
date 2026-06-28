@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 
 from src.jobops_assistant.application_types import EXTERNAL_APPLY, LINKEDIN_EASY_APPLY, UNKNOWN_APPLICATION_TYPE
@@ -11,11 +12,12 @@ from src.jobops_assistant.job_service import list_offers, list_pending_alert_off
 from src.jobops_assistant.models import JobOffer
 from src.jobops_assistant.profile_service import upsert_profile
 from src.jobops_assistant.scrapers.base_scraper import ScrapedJob, SourceBlockedError
+from src.jobops_assistant.scrapers.computrabajo_scraper import ComputrabajoJobScraper
 from src.jobops_assistant.search_sources import add_source, get_due_sources, get_source_by_id
 from src.jobops_assistant.settings import Settings
 
 
-def _settings(tmp_path: Path) -> Settings:
+def _settings(tmp_path: Path, *, enable_selenium: bool = False) -> Settings:
     return Settings(
         db_path=tmp_path / "monitor.db",
         match_threshold=65,
@@ -31,6 +33,11 @@ def _settings(tmp_path: Path) -> Settings:
         telegram_max_message_chars=3500,
         templates_dir=tmp_path / "templates",
         generated_dir=tmp_path / "generated",
+        enable_selenium=enable_selenium,
+        selenium_headless=True,
+        selenium_page_load_timeout=1,
+        selenium_scroll_pause=0,
+        selenium_max_scrolls=0,
     )
 
 
@@ -43,6 +50,55 @@ class _FakeScraper:
         if self.error is not None:
             raise self.error
         return self.jobs
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int, text: str = "", url: str = "", content_type: str = "text/html; charset=utf-8") -> None:
+        self.status_code = status_code
+        self.text = text
+        self.url = url
+        self.headers = {"Content-Type": content_type}
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _FakeSession:
+    def __init__(self, response: _FakeResponse) -> None:
+        self.response = response
+        self.headers: dict[str, str] = {}
+
+    def get(self, url: str, timeout: int):
+        return self.response
+
+
+class _FakeDriver:
+    def __init__(self, html: str, *, current_url: str = "https://example.com/jobs") -> None:
+        self.page_source = html
+        self.current_url = current_url
+        self.timeout = None
+        self.visited_urls: list[str] = []
+        self.scrolls = 0
+        self.quit_called = False
+
+    def set_page_load_timeout(self, timeout: int) -> None:
+        self.timeout = timeout
+
+    def get(self, url: str) -> None:
+        self.visited_urls.append(url)
+        self.current_url = url
+
+    def execute_script(self, script: str) -> None:
+        self.scrolls += 1
+
+    def quit(self) -> None:
+        self.quit_called = True
+
+    def find_elements(self, by, selector: str):
+        try:
+            return [object() for _ in BeautifulSoup(self.page_source or "", "html.parser").select(selector)]
+        except Exception:
+            return []
 
 
 def _backend_job(
@@ -284,6 +340,42 @@ def test_successful_source_resets_failure_state(tmp_path: Path, monkeypatch):
         assert updated.last_error == ""
         assert updated.paused_until is None
         assert updated.last_failed_at is None
+
+
+def test_source_not_paused_on_scraper_broken(tmp_path: Path, monkeypatch, caplog):
+    settings = _settings(tmp_path, enable_selenium=True)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+    html = "<html><body>" + ("<div>contenido visible sin cards</div>" * 80) + "</body></html>"
+
+    with Session(engine) as session:
+        source = add_source(
+            session,
+            portal="computrabajo",
+            target_role="backend_junior",
+            search_url="https://computrabajo.example/jobs",
+            interval_minutes=15,
+            min_interval_minutes=settings.min_monitor_interval_minutes,
+        )
+        scraper = ComputrabajoJobScraper(
+            settings,
+            driver_factory=lambda: _FakeDriver(html, current_url=source.search_url),
+        )
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.get_scraper",
+            lambda portal, settings: scraper,
+        )
+        caplog.set_level("INFO")
+
+        logs = run_fresh_monitor(session, settings, force_all=True)
+        updated = get_source_by_id(session, source.id)
+
+        assert updated is not None
+        assert updated.failure_count == 0
+        assert updated.paused_until is None
+        assert updated.last_error == ""
+        assert any("encontradas=0" in line for line in logs)
+        assert "[computrabajo] estado=scraper_broken" in caplog.text
 
 
 def test_monitor_calls_telegram_only_above_threshold(tmp_path: Path, monkeypatch):

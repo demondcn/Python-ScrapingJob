@@ -78,6 +78,52 @@ FRONTEND_FALSE_POSITIVE_SIGNALS = (
     "frontoffice",
 )
 
+SUPPORT_TI_TARGETS = ("soporte_ti_junior", "hardware_support_junior")
+
+SUPPORT_TI_SIGNALS = (
+    "soporte ti",
+    "soporte tecnico",
+    "soporte en sitio",
+    "mesa de ayuda",
+    "help desk",
+    "service desk",
+    "tecnico de sistemas",
+    "auxiliar de sistemas",
+    "nivel 1",
+    "level 1",
+    "n1",
+    "tecnico junior",
+)
+
+HARDWARE_SUPPORT_SIGNALS = (
+    "hardware",
+    "mantenimiento de equipos",
+    "reparacion de computadores",
+    "reparacion de computadoras",
+    "redes",
+    "cableado",
+    "impresoras",
+    "instalacion de software",
+    "configuracion de equipos",
+    "windows",
+    "office",
+    "directorio activo",
+    "active directory",
+)
+
+SUPPORT_TI_EXCLUSION_SIGNALS = (
+    "senior",
+    "lead",
+    "lider",
+    "arquitecto",
+    "manager",
+    "desarrollador senior",
+    "devops senior",
+    "data scientist",
+    "ventas puras sin soporte",
+    "comercial sin soporte tecnico",
+)
+
 TARGET_TITLE_SIGNALS: dict[str, tuple[str, ...]] = {
     "backend_junior": (
         "backend",
@@ -146,6 +192,8 @@ TARGET_TITLE_SIGNALS: dict[str, tuple[str, ...]] = {
         "mesa de ayuda",
         "help desk",
     ),
+    "soporte_ti_junior": SUPPORT_TI_SIGNALS + HARDWARE_SUPPORT_SIGNALS,
+    "hardware_support_junior": HARDWARE_SUPPORT_SIGNALS + SUPPORT_TI_SIGNALS,
     "infraestructura_junior": (
         "it",
         "sistemas",
@@ -261,6 +309,8 @@ TARGET_CONTENT_SIGNALS: dict[str, tuple[str, ...]] = {
         "application support",
         "mesa de ayuda",
     ),
+    "soporte_ti_junior": SUPPORT_TI_SIGNALS + HARDWARE_SUPPORT_SIGNALS,
+    "hardware_support_junior": HARDWARE_SUPPORT_SIGNALS + SUPPORT_TI_SIGNALS,
     "infraestructura_junior": (
         "it",
         "sistemas",
@@ -475,6 +525,14 @@ TARGET_RULES: dict[str, dict[str, object]] = {
             "reportes",
             "diagnostico",
         ),
+        "weight": 5,
+    },
+    "soporte_ti_junior": {
+        "keywords": SUPPORT_TI_SIGNALS + HARDWARE_SUPPORT_SIGNALS,
+        "weight": 5,
+    },
+    "hardware_support_junior": {
+        "keywords": HARDWARE_SUPPORT_SIGNALS + SUPPORT_TI_SIGNALS,
         "weight": 5,
     },
     "infraestructura_junior": {
@@ -714,6 +772,15 @@ def analyze_relevance_for_target(job, target_role: str) -> RelevanceAnalysis:
             detected_keywords=_dedupe_strings(title_senior),
         )
 
+    if normalized_target in SUPPORT_TI_TARGETS:
+        exclusion_hits = _matched_terms(_normalize(" ".join([title, content])), SUPPORT_TI_EXCLUSION_SIGNALS)
+        if exclusion_hits:
+            return RelevanceAnalysis(
+                relevant=False,
+                reasons=[f"contiene exclusion para soporte TI: {exclusion_hits[0]}"],
+                detected_keywords=_dedupe_strings(exclusion_hits),
+            )
+
     title_entry = _matched_terms(title, GENERAL_ENTRY_SIGNALS)
     content_senior = _matched_terms(content, GENERAL_SENIOR_SIGNALS)
     title_hits = _matched_terms(title, TARGET_TITLE_SIGNALS[normalized_target])
@@ -814,6 +881,11 @@ def _matches_target_profile(
         relevant = bool(title_hits or (title_entry and content_hits) or len(content_hits) >= 1)
         return relevant, signals
 
+    if normalized_target in SUPPORT_TI_TARGETS:
+        signals = _dedupe_strings(title_hits + content_hits)
+        relevant = bool(title_hits or (title_entry and content_hits) or len(content_hits) >= 1)
+        return relevant, signals
+
     signals = _dedupe_strings(title_hits + content_hits)
     relevant = bool(title_hits or (title_entry and content_hits) or len(content_hits) >= 2)
     return relevant, signals
@@ -859,6 +931,10 @@ def _infer_targets_from_offer(text: str) -> list[str]:
         inferred.append("fullstack_junior")
     if any(_text_contains(text, keyword) for keyword in TARGET_RULES["devops_trainee"]["keywords"]):
         inferred.append("devops_trainee")
+    if any(_text_contains(text, keyword) for keyword in TARGET_RULES["soporte_ti_junior"]["keywords"]):
+        inferred.append("soporte_ti_junior")
+    if any(_text_contains(text, keyword) for keyword in TARGET_RULES["hardware_support_junior"]["keywords"]):
+        inferred.append("hardware_support_junior")
     if any(_text_contains(text, keyword) for keyword in TARGET_RULES["soporte_aplicaciones"]["keywords"]):
         inferred.append("soporte_aplicaciones")
     return inferred
@@ -871,6 +947,12 @@ def _map_target_alias(value: str) -> str | None:
         "devops_trainee": "devops_trainee",
         "soporte de aplicaciones": "soporte_aplicaciones",
         "soporte_aplicaciones": "soporte_aplicaciones",
+        "soporte ti": "soporte_ti_junior",
+        "soporte ti junior": "soporte_ti_junior",
+        "soporte_ti_junior": "soporte_ti_junior",
+        "hardware support": "hardware_support_junior",
+        "hardware support junior": "hardware_support_junior",
+        "hardware_support_junior": "hardware_support_junior",
         "infraestructura junior": "infraestructura_junior",
         "infraestructura_junior": "infraestructura_junior",
         "cloud support": "cloud_support",

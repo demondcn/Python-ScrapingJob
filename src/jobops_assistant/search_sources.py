@@ -11,6 +11,7 @@ from .discarded_job_service import (
     analyze_linkedin_application_type_for_discard,
     analyze_scraped_job_for_discard,
 )
+from .linkedin_url import normalize_linkedin_source_url
 from .models import JobSearchSource
 from .scrapers.base_scraper import ResponseDebugSnapshot, ScrapedJob
 from .scrapers.registry import get_scraper
@@ -50,10 +51,16 @@ def add_source(
     min_interval_minutes: int = 10,
 ) -> JobSearchSource:
     normalized_interval = _validate_interval(interval_minutes, min_interval_minutes)
+    normalized_search_url = normalize_linkedin_source_url(
+        portal,
+        search_url,
+        keywords=keywords,
+        location=location,
+    )
     source = JobSearchSource(
         portal=portal.strip().lower(),
         target_role=target_role.strip(),
-        search_url=search_url.strip(),
+        search_url=normalized_search_url,
         keywords=keywords.strip(),
         location=location.strip(),
         enabled=enabled,

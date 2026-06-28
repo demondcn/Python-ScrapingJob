@@ -8,6 +8,7 @@ from urllib.parse import quote, urljoin
 
 from bs4 import Tag
 
+from ..linkedin_url import LINKEDIN_SEARCH_BASE_URL, build_linkedin_url
 from ..application_types import EXTERNAL_APPLY, LINKEDIN_EASY_APPLY, UNKNOWN_APPLICATION_TYPE
 from .base_scraper import CaptchaRequiredError, LoginRequiredError, ScrapedJob, SourceBlockedError
 from .selenium_base import SeleniumJobScraper
@@ -222,12 +223,10 @@ def build_linkedin_jobs_url(
     if not location:
         raise ValueError("Debes indicar --location para construir la URL de LinkedIn.")
 
-    params = [
-        ("keywords", keyword),
-        ("location", location),
-    ]
+    params: list[tuple[str, str]] = []
 
     normalized_date = (date_posted or "").strip().casefold()
+    date_code = ""
     if normalized_date and normalized_date != "any":
         date_code = DATE_POSTED_FILTERS.get(normalized_date)
         if date_code is None:
@@ -252,7 +251,8 @@ def build_linkedin_jobs_url(
         params.append(("f_WT", ",".join(workplace_codes)))
 
     query = "&".join(f"{quote(key)}={quote(value, safe=',')}" for key, value in params)
-    return f"https://www.linkedin.com/jobs/search/?{query}"
+    base_url = LINKEDIN_SEARCH_BASE_URL if not query else f"{LINKEDIN_SEARCH_BASE_URL}?{query}"
+    return build_linkedin_url(base_url, keyword, location, date_code)
 
 
 def _map_filter_values(

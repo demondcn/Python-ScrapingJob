@@ -6,6 +6,8 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
+from .linkedin_url import normalize_linkedin_source_url
+
 
 class Base(DeclarativeBase):
     pass
@@ -93,3 +95,23 @@ def _apply_sqlite_migrations(engine) -> None:
                 except OperationalError as exc:
                     if "duplicate column name" not in str(exc).lower():
                         raise
+        if "job_search_sources" in existing_tables:
+            rows = connection.execute(
+                text(
+                    "SELECT id, portal, search_url, keywords, location "
+                    "FROM job_search_sources "
+                    "WHERE lower(portal) IN ('linkedin', 'linkedin_selenium')"
+                )
+            ).mappings()
+            for row in rows:
+                normalized_url = normalize_linkedin_source_url(
+                    row["portal"],
+                    row["search_url"] or "",
+                    keywords=row["keywords"] or "",
+                    location=row["location"] or "",
+                )
+                if normalized_url and normalized_url != (row["search_url"] or "").strip():
+                    connection.execute(
+                        text("UPDATE job_search_sources SET search_url = :search_url WHERE id = :id"),
+                        {"id": row["id"], "search_url": normalized_url},
+                    )

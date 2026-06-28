@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from argparse import Namespace
 from pathlib import Path
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from src.jobops_assistant.cli import (
@@ -75,6 +76,79 @@ def test_update_source_interval_by_id(tmp_path: Path):
         assert updated is not None
         assert updated.interval_minutes == 10
         assert get_source_by_id(session, source.id).interval_minutes == 10
+
+
+def test_add_source_normalizes_linkedin_search_url(tmp_path: Path):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+
+    with Session(engine) as session:
+        source = add_source(
+            session,
+            portal="linkedin_selenium",
+            target_role="backend_junior",
+            search_url=(
+                "https://www.linkedin.com/jobs/search/?keywords=Backend%20Junior"
+                "&location=Colombia&origin=JOB_SEARCH_PAGE_JOB_FILTER&sortBy=R"
+            ),
+            interval_minutes=15,
+            min_interval_minutes=settings.min_monitor_interval_minutes,
+        )
+
+        assert source.search_url == (
+            "https://www.linkedin.com/jobs/search/?keywords=Backend%20Junior"
+            "&location=Colombia&f_AL=true&sortBy=DD"
+        )
+
+
+def test_init_db_normalizes_existing_linkedin_source_urls(tmp_path: Path):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO job_search_sources "
+                "("
+                "id, portal, target_role, search_url, keywords, location, enabled, interval_minutes, "
+                "failure_count, last_error, created_at, updated_at"
+                ") "
+                "VALUES ("
+                ":id, :portal, :target_role, :search_url, :keywords, :location, :enabled, :interval_minutes, "
+                ":failure_count, :last_error, :created_at, :updated_at"
+                ")"
+            ),
+            {
+                "id": 1,
+                "portal": "linkedin_selenium",
+                "target_role": "backend_junior",
+                "search_url": (
+                    "https://www.linkedin.com/jobs/search/?keywords=Backend%20Junior"
+                    "&location=Colombia&currentJobId=123456&f_TPR=r86400&sortBy=R"
+                ),
+                "keywords": "",
+                "location": "",
+                "enabled": True,
+                "interval_minutes": 15,
+                "failure_count": 0,
+                "last_error": "",
+                "created_at": datetime(2026, 5, 7, 10, 0, tzinfo=UTC),
+                "updated_at": datetime(2026, 5, 7, 10, 0, tzinfo=UTC),
+            },
+        )
+
+    init_db(engine)
+
+    with Session(engine) as session:
+        source = get_source_by_id(session, 1)
+
+        assert source is not None
+        assert source.search_url == (
+            "https://www.linkedin.com/jobs/search/?keywords=Backend%20Junior"
+            "&location=Colombia&f_TPR=r86400&f_AL=true&sortBy=DD"
+        )
 
 
 def test_update_source_interval_rejects_below_minimum(tmp_path: Path):

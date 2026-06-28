@@ -248,7 +248,7 @@ def retry_pending_alerts(
     if not offers:
         return ["No hay ofertas pendientes de alerta."]
     digest_queue = {
-        offer.id: (offer, target_role)
+        offer.id: (offer, _resolve_retry_target_role(session, offer, target_role))
         for offer in offers
         if offer.id is not None
     }
@@ -405,7 +405,11 @@ def _send_digest_queue(
         if offer.id is not None
     }
     offers = [offer for offer, _ in queue_items]
-    sent, message, delivered_offers = send_job_alert_digest(offers, settings)
+    sent, message, delivered_offers = _send_job_alert_digest_with_targets(
+        offers,
+        settings,
+        queue_items,
+    )
     delivered_ids = {offer.id for offer in delivered_offers if offer.id is not None}
     for offer, _ in queue_items:
         delivered = offer.id in delivered_ids
@@ -458,6 +462,43 @@ def _queue_digest_offer(
     if offer.id is None:
         return
     digest_queue.setdefault(offer.id, (offer, target_role))
+
+
+def _send_job_alert_digest_with_targets(
+    offers: list[JobOffer],
+    settings: Settings,
+    queue_items: list[tuple[JobOffer, str | None]],
+) -> tuple[bool, str, list[JobOffer]]:
+    snapshots: list[tuple[JobOffer, bool, str | None]] = []
+    for offer, target_role in queue_items:
+        if not target_role:
+            continue
+        had_previous = hasattr(offer, "_jobops_target_role")
+        previous = getattr(offer, "_jobops_target_role", None)
+        setattr(offer, "_jobops_target_role", target_role)
+        snapshots.append((offer, had_previous, previous))
+    try:
+        return send_job_alert_digest(offers, settings)
+    finally:
+        for offer, had_previous, previous in snapshots:
+            if had_previous:
+                setattr(offer, "_jobops_target_role", previous)
+            else:
+                try:
+                    delattr(offer, "_jobops_target_role")
+                except AttributeError:
+                    pass
+
+
+def _resolve_retry_target_role(session: Session, offer: JobOffer, target_role: str | None) -> str | None:
+    if target_role:
+        return target_role
+    if offer.source_id is None:
+        return None
+    source = session.get(JobSearchSource, offer.source_id)
+    if source is None:
+        return None
+    return source.target_role
 
 
 def _is_pending_alert_offer(offer: JobOffer, settings: Settings) -> bool:

@@ -218,6 +218,45 @@ def test_is_relevant_infraestructura_accepts_redes_y_soporte_ti():
     assert relevant is True
 
 
+def test_is_relevant_soporte_ti_accepts_nivel_1_help_desk():
+    job = SimpleNamespace(
+        title="Soporte TI Nivel 1",
+        description="Mesa de ayuda, help desk, soporte tecnico a usuarios, Windows y Office.",
+        requirements="Tecnico junior",
+        company="ABC",
+        raw_posted_text="Hoy",
+    )
+    relevant, reasons = is_relevant_for_target(job, "soporte_ti_junior")
+    assert relevant is True
+    assert reasons
+
+
+def test_is_relevant_hardware_support_accepts_mantenimiento_e_impresoras():
+    job = SimpleNamespace(
+        title="Soporte Hardware",
+        description="Mantenimiento de equipos, reparacion de computadores, impresoras y cableado.",
+        requirements="Tecnico de sistemas",
+        company="ABC",
+        raw_posted_text="Hoy",
+    )
+    relevant, reasons = is_relevant_for_target(job, "hardware_support_junior")
+    assert relevant is True
+    assert reasons
+
+
+def test_is_relevant_soporte_ti_discards_comercial_sin_soporte_tecnico():
+    job = SimpleNamespace(
+        title="Asesor comercial",
+        description="Ventas puras sin soporte y gestion comercial.",
+        requirements="",
+        company="ABC",
+        raw_posted_text="Hoy",
+    )
+    relevant, reasons = is_relevant_for_target(job, "soporte_ti_junior")
+    assert relevant is False
+    assert any("exclusion" in reason for reason in reasons)
+
+
 def _job(title: str, description: str = "", requirements: str = ""):
     return SimpleNamespace(
         title=title,

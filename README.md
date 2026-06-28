@@ -250,7 +250,7 @@ Portales soportados:
 Comandos:
 
 ```powershell
-python main.py sources add --portal linkedin --target-role devops_trainee --url "https://www.linkedin.com/jobs/search/?keywords=DevOps%20Trainee&location=Colombia&f_TPR=r86400" --interval 15
+python main.py sources add --portal linkedin --target-role devops_trainee --url "https://www.linkedin.com/jobs/search/?keywords=DevOps%20Trainee&location=Colombia&f_TPR=r86400&f_AL=true&sortBy=DD" --interval 15
 python main.py sources add --portal computrabajo --target-role soporte_aplicaciones --url "URL_DE_COMPUTRABAJO_ORDENADA_POR_FECHA" --interval 15
 python main.py sources add --portal indeed_selenium --target-role backend_junior --url "URL_DE_INDEED" --interval 30
 python main.py sources add --portal linkedin_selenium --target-role devops_trainee --url "URL_DE_LINKEDIN" --interval 30
@@ -335,7 +335,7 @@ Reglas de uso:
 - Para reutilizar una sesion ya abierta en Chrome, ejecuta Selenium con `JOBOPS_SELENIUM_HEADLESS=false`, `JOBOPS_SELENIUM_USER_DATA_DIR` apuntando al `User Data` local de Chrome y `JOBOPS_SELENIUM_PROFILE_DIRECTORY=Default` o el perfil que corresponda.
 - LinkedIn usa Selenium para abrir la busqueda publica, hacer scroll limitado, pulsar el boton publico de mas resultados cuando aparece y parsear cards `div.base-card` con BeautifulSoup.
 - Con `JOBOPS_LINKEDIN_ONLY_EASY_APPLY=true`, `linkedin_selenium` descarta las ofertas que no muestren "Solicitud sencilla", "Solicitud simple", "Solicitar facilmente" o "Easy Apply"; esas ofertas van a `discarded_jobs` con la razon `no es solicitud sencilla de LinkedIn`.
-- Los filtros del constructor de URL de LinkedIn mapean `24h` a `f_TPR=r86400`, `entry_level` a `f_E=2`, y `remote` + `hybrid` a `f_WT=2,3`.
+- Los filtros del constructor de URL de LinkedIn mapean `24h` a `f_TPR=r86400`, `entry_level` a `f_E=2`, `remote` + `hybrid` a `f_WT=2,3`, y siempre fuerzan `f_AL=true` y `sortBy=DD`.
 - Si aparece Security Check, captcha, login, authwall, checkpoint, access denied o forbidden, registra el bloqueo y omite la fuente.
 - Puede ser mas lento que los scrapers con `requests`; para fuentes Selenium se recomienda intervalo minimo de 30 minutos.
 - Si Indeed o LinkedIn bloquean la lectura publica, usa alertas por correo del portal y el Gmail Reader como alternativa.

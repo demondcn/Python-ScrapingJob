@@ -179,6 +179,7 @@ def test_format_job_alert_never_raises_for_invalid_timezone():
 def test_load_settings_prefers_telegram_chat_ids_env(monkeypatch):
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "fallback-chat")
     monkeypatch.setenv("TELEGRAM_CHAT_IDS", " chat-one, ,chat-two ")
+    monkeypatch.setenv("TELEGRAM_CHAT_TARGETS", "")
 
     settings = load_settings()
 
@@ -189,10 +190,41 @@ def test_load_settings_prefers_telegram_chat_ids_env(monkeypatch):
 def test_load_settings_falls_back_to_telegram_chat_id_when_chat_ids_is_empty(monkeypatch):
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "fallback-chat")
     monkeypatch.setenv("TELEGRAM_CHAT_IDS", " , ")
+    monkeypatch.setenv("TELEGRAM_CHAT_TARGETS", "")
 
     settings = load_settings()
 
     assert settings.telegram_chat_ids == ["fallback-chat"]
+
+
+def test_load_settings_parses_telegram_chat_targets(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "fallback-chat")
+    monkeypatch.setenv("TELEGRAM_CHAT_IDS", "chat-one,chat-two")
+    monkeypatch.setenv(
+        "TELEGRAM_CHAT_TARGETS",
+        "chat-one:*; chat-two:soporte_ti_junior, hardware_support_junior",
+    )
+
+    settings = load_settings()
+
+    assert settings.telegram_chat_targets == {
+        "chat-one": {"*"},
+        "chat-two": {"soporte_ti_junior", "hardware_support_junior"},
+    }
+
+
+def test_load_settings_parses_telegram_chat_labels(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "fallback-chat")
+    monkeypatch.setenv("TELEGRAM_CHAT_IDS", "chat-one,chat-two")
+    monkeypatch.setenv("TELEGRAM_CHAT_TARGETS", "")
+    monkeypatch.setenv("TELEGRAM_CHAT_LABELS", "chat-one:Alan; chat-two:Ricardo")
+
+    settings = load_settings()
+
+    assert settings.telegram_chat_labels == {
+        "chat-one": "Alan",
+        "chat-two": "Ricardo",
+    }
 
 
 def test_send_job_alert_with_single_telegram_chat_id_sends_once(monkeypatch, tmp_path):
@@ -304,6 +336,337 @@ def test_send_job_alert_digest_fails_when_all_chats_fail(monkeypatch, tmp_path, 
     assert attempts == ["bad-chat", "other-bad-chat"]
     assert "fallo en todos los chats, se deja pendiente" in message
     assert "[telegram] fallo en todos los chats, se deja pendiente" in caplog.text
+
+
+def test_send_job_alert_digest_routes_soporte_ti_to_matching_chat(monkeypatch, tmp_path):
+    sent: list[tuple[str, str]] = []
+    settings = _telegram_settings(
+        tmp_path,
+        telegram_chat_ids=["8732193921", "7800792706"],
+        telegram_chat_targets={
+            "8732193921": {"backend_junior", "frontend_junior", "fullstack_junior", "devops_trainee"},
+            "7800792706": {"soporte_ti_junior", "hardware_support_junior"},
+        },
+    )
+    offer = JobOffer(
+        id=23,
+        title="Soporte TI Nivel 1",
+        company="IT Help",
+        portal="Computrabajo",
+        location="Bogota",
+        modality="Presencial",
+        salary="",
+        url="https://example.com/soporte-ti",
+        description="Mesa de ayuda, soporte tecnico a usuarios, Windows y Office.",
+        compatibility_score=90,
+    )
+
+    monkeypatch.setattr(
+        "src.jobops_assistant.telegram_notifier._post_telegram_message_to_chat",
+        lambda settings, message, chat_id: sent.append((chat_id, message)),
+    )
+
+    sent_ok, _message, delivered = send_job_alert_digest([offer], settings)
+
+    assert sent_ok is True
+    assert delivered == [offer]
+    assert [chat_id for chat_id, _ in sent] == ["7800792706"]
+    assert "Target: soporte_ti_junior" in sent[0][1]
+    assert "Tipo: Soporte TI / Hardware" in sent[0][1]
+
+
+def test_send_job_alert_digest_does_not_route_backend_to_soporte_chat(monkeypatch, tmp_path):
+    sent_chat_ids: list[str] = []
+    settings = _telegram_settings(
+        tmp_path,
+        telegram_chat_ids=["8732193921", "7800792706"],
+        telegram_chat_targets={
+            "8732193921": {"backend_junior", "frontend_junior", "fullstack_junior", "devops_trainee"},
+            "7800792706": {"soporte_ti_junior", "hardware_support_junior"},
+        },
+    )
+    offer = JobOffer(
+        id=24,
+        title="Backend Developer",
+        company="API Labs",
+        portal="LinkedIn",
+        location="Remoto",
+        modality="Remoto",
+        salary="",
+        url="https://example.com/backend-route",
+        description="Node.js, APIs REST, SQL y PostgreSQL.",
+        compatibility_score=90,
+    )
+
+    monkeypatch.setattr(
+        "src.jobops_assistant.telegram_notifier._post_telegram_message_to_chat",
+        lambda settings, message, chat_id: sent_chat_ids.append(chat_id),
+    )
+
+    sent_ok, _message, delivered = send_job_alert_digest([offer], settings)
+
+    assert sent_ok is True
+    assert delivered == [offer]
+    assert sent_chat_ids == ["8732193921"]
+
+
+def test_send_job_alert_digest_routes_hardware_support_to_matching_chat(monkeypatch, tmp_path):
+    sent_chat_ids: list[str] = []
+    settings = _telegram_settings(
+        tmp_path,
+        telegram_chat_ids=["8732193921", "7800792706"],
+        telegram_chat_targets={
+            "8732193921": {"backend_junior", "frontend_junior", "fullstack_junior", "devops_trainee"},
+            "7800792706": {"soporte_ti_junior", "hardware_support_junior"},
+        },
+    )
+    offer = JobOffer(
+        id=25,
+        title="Soporte Hardware",
+        company="IT Field",
+        portal="Magneto",
+        location="Bogota",
+        modality="Presencial",
+        salary="",
+        url="https://example.com/hardware-route",
+        description="Mantenimiento de equipos, impresoras, cableado y configuracion de equipos.",
+        compatibility_score=90,
+    )
+
+    monkeypatch.setattr(
+        "src.jobops_assistant.telegram_notifier._post_telegram_message_to_chat",
+        lambda settings, message, chat_id: sent_chat_ids.append(chat_id),
+    )
+
+    sent_ok, _message, delivered = send_job_alert_digest([offer], settings)
+
+    assert sent_ok is True
+    assert delivered == [offer]
+    assert sent_chat_ids == ["7800792706"]
+
+
+def test_send_job_alert_digest_routes_everything_to_wildcard_chat(monkeypatch, tmp_path):
+    sent_chat_ids: list[str] = []
+    settings = _telegram_settings(
+        tmp_path,
+        telegram_chat_ids=["8732193921", "7800792706"],
+        telegram_chat_targets={
+            "8732193921": {"*"},
+            "7800792706": {"soporte_ti_junior", "hardware_support_junior"},
+        },
+    )
+    offer = JobOffer(
+        id=26,
+        title="Backend Developer",
+        company="API Labs",
+        portal="LinkedIn",
+        location="Remoto",
+        modality="Remoto",
+        salary="",
+        url="https://example.com/backend-wildcard",
+        description="Node.js, APIs REST, SQL y PostgreSQL.",
+        compatibility_score=90,
+    )
+
+    monkeypatch.setattr(
+        "src.jobops_assistant.telegram_notifier._post_telegram_message_to_chat",
+        lambda settings, message, chat_id: sent_chat_ids.append(chat_id),
+    )
+
+    sent_ok, _message, delivered = send_job_alert_digest([offer], settings)
+
+    assert sent_ok is True
+    assert delivered == [offer]
+    assert sent_chat_ids == ["8732193921"]
+
+
+def test_send_job_alert_digest_without_chat_targets_keeps_sending_to_all_chats(monkeypatch, tmp_path):
+    sent_chat_ids: list[str] = []
+    settings = _telegram_settings(
+        tmp_path,
+        telegram_chat_ids=["8732193921", "7800792706"],
+    )
+    offer = JobOffer(
+        id=27,
+        title="Backend Developer",
+        company="API Labs",
+        portal="LinkedIn",
+        location="Remoto",
+        modality="Remoto",
+        salary="",
+        url="https://example.com/backend-no-targets",
+        description="Node.js, APIs REST, SQL y PostgreSQL.",
+        compatibility_score=90,
+    )
+
+    monkeypatch.setattr(
+        "src.jobops_assistant.telegram_notifier._post_telegram_message_to_chat",
+        lambda settings, message, chat_id: sent_chat_ids.append(chat_id),
+    )
+
+    sent_ok, _message, delivered = send_job_alert_digest([offer], settings)
+
+    assert sent_ok is True
+    assert delivered == [offer]
+    assert sent_chat_ids == ["8732193921", "7800792706"]
+
+
+def test_send_job_alert_digest_with_labels_shows_backend_recipients(monkeypatch, tmp_path):
+    sent: list[tuple[str, str]] = []
+    settings = _telegram_settings(
+        tmp_path,
+        telegram_chat_id="8732193921",
+        telegram_chat_ids=["8732193921", "7800792706"],
+        telegram_chat_targets={
+            "8732193921": {"*"},
+            "7800792706": {"soporte_ti_junior", "hardware_support_junior"},
+        },
+        telegram_chat_labels={"8732193921": "Alan", "7800792706": "Ricardo"},
+    )
+    offer = JobOffer(
+        id=28,
+        title="Backend Developer",
+        company="API Labs",
+        portal="LinkedIn",
+        location="Remoto",
+        modality="Remoto",
+        salary="",
+        url="https://example.com/backend-labels",
+        description="Node.js, APIs REST, SQL y PostgreSQL.",
+        compatibility_score=90,
+    )
+
+    monkeypatch.setattr(
+        "src.jobops_assistant.telegram_notifier._post_telegram_message_to_chat",
+        lambda settings, message, chat_id: sent.append((chat_id, message)),
+    )
+
+    sent_ok, _message, delivered = send_job_alert_digest([offer], settings)
+
+    assert sent_ok is True
+    assert delivered == [offer]
+    assert [chat_id for chat_id, _ in sent] == ["8732193921"]
+    assert "📌 Target: backend_junior" in sent[0][1]
+    assert "📨 Enviado a: Alan" in sent[0][1]
+    assert "Ricardo" not in sent[0][1]
+
+
+def test_send_job_alert_digest_with_labels_shows_support_recipients(monkeypatch, tmp_path):
+    sent: list[tuple[str, str]] = []
+    settings = _telegram_settings(
+        tmp_path,
+        telegram_chat_id="8732193921",
+        telegram_chat_ids=["8732193921", "7800792706"],
+        telegram_chat_targets={
+            "8732193921": {"*"},
+            "7800792706": {"soporte_ti_junior", "hardware_support_junior"},
+        },
+        telegram_chat_labels={"8732193921": "Alan", "7800792706": "Ricardo"},
+    )
+    offer = JobOffer(
+        id=29,
+        title="Soporte TI Nivel 1",
+        company="IT Help",
+        portal="Computrabajo",
+        location="Bogota",
+        modality="Presencial",
+        salary="",
+        url="https://example.com/support-labels",
+        description="Mesa de ayuda, soporte tecnico a usuarios, Windows y Office.",
+        compatibility_score=90,
+    )
+
+    monkeypatch.setattr(
+        "src.jobops_assistant.telegram_notifier._post_telegram_message_to_chat",
+        lambda settings, message, chat_id: sent.append((chat_id, message)),
+    )
+
+    sent_ok, _message, delivered = send_job_alert_digest([offer], settings)
+
+    assert sent_ok is True
+    assert delivered == [offer]
+    assert [chat_id for chat_id, _ in sent] == ["7800792706", "8732193921"]
+    assert all("📨 Enviado a: Alan, Ricardo" in message for _chat_id, message in sent)
+
+
+def test_send_job_alert_digest_with_labels_logs_label_when_ricardo_fails(monkeypatch, tmp_path, caplog):
+    sent: list[tuple[str, str]] = []
+    settings = _telegram_settings(
+        tmp_path,
+        telegram_chat_id="8732193921",
+        telegram_chat_ids=["8732193921", "7800792706"],
+        telegram_chat_targets={
+            "8732193921": {"*"},
+            "7800792706": {"soporte_ti_junior", "hardware_support_junior"},
+        },
+        telegram_chat_labels={"8732193921": "Alan", "7800792706": "Ricardo"},
+    )
+    offer = JobOffer(
+        id=30,
+        title="Soporte TI Nivel 1",
+        company="IT Help",
+        portal="Computrabajo",
+        location="Bogota",
+        modality="Presencial",
+        salary="",
+        url="https://example.com/support-fail-labels",
+        description="Mesa de ayuda, soporte tecnico a usuarios, Windows y Office.",
+        compatibility_score=90,
+    )
+
+    def _post(settings, message, chat_id):
+        if chat_id == "7800792706":
+            raise RuntimeError("blocked")
+        sent.append((chat_id, message))
+
+    caplog.set_level(logging.INFO, logger="src.jobops_assistant.telegram_notifier")
+    monkeypatch.setattr("src.jobops_assistant.telegram_notifier._post_telegram_message_to_chat", _post)
+
+    sent_ok, _message, delivered = send_job_alert_digest([offer], settings)
+
+    assert sent_ok is True
+    assert delivered == [offer]
+    assert [chat_id for chat_id, _ in sent] == ["8732193921"]
+    assert "📨 Enviado a: Alan, Ricardo" in sent[0][1]
+    assert "⚠️ Error enviando a: Ricardo" in sent[0][1]
+    assert "[telegram] enviado a Alan" in caplog.text
+    assert "[telegram] error enviando a Ricardo: blocked" in caplog.text
+
+
+def test_send_job_alert_digest_without_labels_uses_chat_id_in_recipient_line(monkeypatch, tmp_path):
+    sent: list[tuple[str, str]] = []
+    settings = _telegram_settings(
+        tmp_path,
+        telegram_chat_id="8732193921",
+        telegram_chat_ids=["8732193921", "7800792706"],
+        telegram_chat_targets={
+            "8732193921": {"*"},
+            "7800792706": {"soporte_ti_junior", "hardware_support_junior"},
+        },
+    )
+    offer = JobOffer(
+        id=31,
+        title="Backend Developer",
+        company="API Labs",
+        portal="LinkedIn",
+        location="Remoto",
+        modality="Remoto",
+        salary="",
+        url="https://example.com/backend-chat-id-label",
+        description="Node.js, APIs REST, SQL y PostgreSQL.",
+        compatibility_score=90,
+    )
+
+    monkeypatch.setattr(
+        "src.jobops_assistant.telegram_notifier._post_telegram_message_to_chat",
+        lambda settings, message, chat_id: sent.append((chat_id, message)),
+    )
+
+    sent_ok, _message, delivered = send_job_alert_digest([offer], settings)
+
+    assert sent_ok is True
+    assert delivered == [offer]
+    assert "📨 Enviado a: 8732193921" in sent[0][1]
 
 
 def test_send_job_alert_digest_limits_jobs_and_mentions_additional(monkeypatch, tmp_path):

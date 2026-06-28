@@ -35,6 +35,8 @@ class Settings:
     linkedin_only_easy_apply: bool = False
     notify_after_each_source: bool = False
     telegram_chat_ids: list[str] = field(default_factory=list)
+    telegram_chat_targets: dict[str, set[str]] = field(default_factory=dict)
+    telegram_chat_labels: dict[str, str] = field(default_factory=dict)
 
 
 def load_settings() -> Settings:
@@ -47,6 +49,8 @@ def load_settings() -> Settings:
         os.getenv("TELEGRAM_CHAT_IDS"),
         fallback_chat_id=telegram_chat_id,
     )
+    telegram_chat_targets = _parse_telegram_chat_targets(os.getenv("TELEGRAM_CHAT_TARGETS"))
+    telegram_chat_labels = _parse_telegram_chat_labels(os.getenv("TELEGRAM_CHAT_LABELS"))
     return Settings(
         db_path=db_path,
         match_threshold=int(os.getenv("JOBOPS_MATCH_THRESHOLD", "65")),
@@ -82,6 +86,8 @@ def load_settings() -> Settings:
         linkedin_only_easy_apply=_parse_bool(os.getenv("JOBOPS_LINKEDIN_ONLY_EASY_APPLY", "false")),
         notify_after_each_source=_parse_bool(os.getenv("JOBOPS_NOTIFY_AFTER_EACH_SOURCE", "false")),
         telegram_chat_ids=telegram_chat_ids,
+        telegram_chat_targets=telegram_chat_targets,
+        telegram_chat_labels=telegram_chat_labels,
     )
 
 
@@ -98,3 +104,39 @@ def _parse_telegram_chat_ids(raw_chat_ids: str | None, *, fallback_chat_id: str)
     if chat_ids:
         return chat_ids
     return [fallback_chat_id] if fallback_chat_id else []
+
+
+def _parse_telegram_chat_targets(raw_chat_targets: str | None) -> dict[str, set[str]]:
+    chat_targets: dict[str, set[str]] = {}
+    for raw_entry in (raw_chat_targets or "").split(";"):
+        entry = raw_entry.strip()
+        if not entry:
+            continue
+        chat_id, separator, raw_targets = entry.partition(":")
+        if not separator:
+            continue
+        chat_id = chat_id.strip()
+        targets = {
+            target.strip().casefold()
+            for target in raw_targets.split(",")
+            if target.strip()
+        }
+        if chat_id and targets:
+            chat_targets[chat_id] = targets
+    return chat_targets
+
+
+def _parse_telegram_chat_labels(raw_chat_labels: str | None) -> dict[str, str]:
+    chat_labels: dict[str, str] = {}
+    for raw_entry in (raw_chat_labels or "").split(";"):
+        entry = raw_entry.strip()
+        if not entry:
+            continue
+        chat_id, separator, label = entry.partition(":")
+        if not separator:
+            continue
+        chat_id = chat_id.strip()
+        label = label.strip()
+        if chat_id and label:
+            chat_labels[chat_id] = label
+    return chat_labels

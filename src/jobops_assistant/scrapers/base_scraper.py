@@ -11,6 +11,7 @@ from dateutil import parser as date_parser
 import requests
 
 from ..date_utils import parse_relative_posted_text
+from ..linkedin_url import normalize_linkedin_source_url
 from ..application_types import UNKNOWN_APPLICATION_TYPE
 from ..models import JobSearchSource
 from ..settings import Settings
@@ -96,7 +97,7 @@ class BaseJobScraper:
         )
 
     def build_search_url(self, source: JobSearchSource) -> str:
-        return source.search_url
+        return normalize_linkedin_source_url(source.portal, source.search_url)
 
     def fetch_search_results(self, source: JobSearchSource) -> str:
         return self._request_text(self.build_search_url(source))
@@ -139,7 +140,7 @@ class BaseJobScraper:
                 break
         return results
 
-    def _request_text(self, url: str) -> str:
+    def _request_response(self, url: str):
         try:
             response = self.session.get(url, timeout=self.settings.scraper_timeout)
         except requests.Timeout as exc:
@@ -155,6 +156,11 @@ class BaseJobScraper:
             content_type=self._clean_text(getattr(response, "headers", {}).get("Content-Type", "")),
             html=text,
         )
+        return response
+
+    def _request_text(self, url: str) -> str:
+        response = self._request_response(url)
+        text = response.text
         if response.status_code == 403:
             self._set_block_reason("status 403")
             raise SourceBlockedError(self.blocked_error_message)
