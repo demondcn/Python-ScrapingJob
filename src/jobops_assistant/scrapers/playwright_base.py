@@ -56,13 +56,16 @@ class PlaywrightBrowserSession:
         settings,
         *,
         headless: bool | None = None,
-        user_data_dir: str = "",
+        user_data_dir: str | None = None,
     ) -> None:
         self.settings = settings
         self.headless = getattr(settings, "playwright_headless", True) if headless is None else headless
-        self.user_data_dir = self._expand_browser_setting(
-            user_data_dir or getattr(settings, "playwright_user_data_dir", DEFAULT_PLAYWRIGHT_USER_DATA_DIR)
+        configured_user_data_dir = (
+            getattr(settings, "playwright_user_data_dir", DEFAULT_PLAYWRIGHT_USER_DATA_DIR)
+            if user_data_dir is None
+            else user_data_dir
         )
+        self.user_data_dir = self._expand_browser_setting(configured_user_data_dir)
         self.timeout_seconds = max(
             1,
             int(getattr(settings, "playwright_page_load_timeout", getattr(settings, "scraper_timeout", 20)) or 1),
@@ -217,10 +220,12 @@ class PlaywrightDriverAdapter:
         settings,
         *,
         log_playwright: bool = True,
+        headless: bool | None = None,
+        user_data_dir: str | None = None,
     ) -> None:
         self.settings = settings
         self.log_playwright = log_playwright
-        self.session = PlaywrightBrowserSession(settings)
+        self.session = PlaywrightBrowserSession(settings, headless=headless, user_data_dir=user_data_dir)
         self.page = None
         self.timeout = max(
             1,

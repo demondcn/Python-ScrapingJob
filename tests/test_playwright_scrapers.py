@@ -8,7 +8,9 @@ import pytest
 from src.jobops_assistant import cli as cli_module
 from src.jobops_assistant.cli import _handle_playwright_login, _handle_playwright_test
 from src.jobops_assistant.search_sources import SourceTestResult
-from src.jobops_assistant.scrapers.base_scraper import CaptchaRequiredError, ScrapedJob
+from src.jobops_assistant.scrapers.base_scraper import ScrapedJob
+from src.jobops_assistant.scrapers import computrabajo_playwright_scraper as computrabajo_module
+from src.jobops_assistant.scrapers import playwright_base as playwright_base_module
 from src.jobops_assistant.scrapers.computrabajo_playwright_scraper import ComputrabajoPlaywrightJobScraper
 from src.jobops_assistant.scrapers.indeed_playwright_scraper import IndeedPlaywrightJobScraper
 from src.jobops_assistant.scrapers.linkedin_playwright_scraper import LinkedInPlaywrightJobScraper
@@ -225,9 +227,9 @@ def test_computrabajo_playwright_loads_page(tmp_path: Path):
 
     assert "Soporte de Aplicaciones Junior" in rendered_html
     assert driver.visited_urls == [source_url]
-    assert driver.load_states[0][0] == "domcontentloaded"
-    assert 2.0 in driver.timeout_waits
-    assert driver.scrolls >= 3
+    assert driver.load_states == []
+    assert 4.0 in driver.timeout_waits
+    assert driver.scrolls == 0
     assert driver.quit_called is True
 
 
@@ -242,15 +244,8 @@ def test_computrabajo_playwright_extract_jobs_from_rendered_html(tmp_path: Path)
               <p class="fs16 fc_base mt5">Acme Backend</p>
               <p class="fs13 fc_aux mt15">Remoto</p>
               <span class="fc_aux fs13">Publicada hoy</span>
+              <p class="summary">Python, SQL y APIs.</p>
             </article>
-            """,
-            detail_url: """
-            <div class="box_detail">
-              <h1>Backend Junior</h1>
-              <div class="box_company"><h2>Acme Backend</h2></div>
-              <p class="fc_aux">Remoto</p>
-              <div class="mbB">Python, SQL y APIs.</div>
-            </div>
             """,
         }
     )
@@ -263,7 +258,7 @@ def test_computrabajo_playwright_extract_jobs_from_rendered_html(tmp_path: Path)
     assert jobs[0].company == "Acme Backend"
     assert jobs[0].location == "Remoto"
     assert jobs[0].description == "Python, SQL y APIs."
-    assert jobs[0].url == detail_url
+    assert jobs[0].url == f"{detail_url}?utm_source=test"
     assert jobs[0].portal == "computrabajo_playwright"
 
 
@@ -328,8 +323,9 @@ def test_computrabajo_playwright_logs_debug_when_empty(tmp_path: Path, capsys):
     output = capsys.readouterr().out
     assert jobs == []
     assert "[computrabajo] final_url=https://computrabajo.example/jobs" in output
-    assert "[computrabajo] page_title=Resultados de busqueda" in output
+    assert "[computrabajo] html_length=" in output
     assert "[computrabajo] job_containers_before_parse=0" in output
+    assert "[computrabajo] blocked=true" in output
     assert "[computrabajo] html_snippet=" in output
 
 
@@ -354,8 +350,42 @@ def test_computrabajo_playwright_does_not_wait_for_networkidle(tmp_path: Path):
     rendered_html = scraper.fetch_search_results(_source("computrabajo_playwright", source_url))
 
     assert "Soporte de Aplicaciones Junior" in rendered_html
-    assert driver.load_states
-    assert all(state != "networkidle" for state, _ in driver.load_states)
+    assert driver.load_states == []
+
+
+def test_computrabajo_playwright_bypasses_adapter_with_raw_driver(tmp_path: Path, monkeypatch, capsys):
+    events: list[str] = []
+
+    class _SentinelRawDriver(_FakeDriver):
+        def __init__(self, timeout_seconds: int) -> None:
+            super().__init__(
+                """
+                <article>
+                  <h2><a href="/ofertas/1">Soporte de Aplicaciones Junior</a></h2>
+                  <p class="fs16 fc_base mt5">ABC Tecnologia</p>
+                </article>
+                """,
+                current_url="https://computrabajo.example/jobs",
+            )
+            events.append(f"raw:{timeout_seconds}")
+            self.last_status_code = 200
+
+    def _unexpected_adapter(*args, **kwargs):
+        raise AssertionError("PlaywrightDriverAdapter no debe usarse en Computrabajo")
+
+    monkeypatch.setattr(computrabajo_module, "_RawComputrabajoPlaywrightDriver", _SentinelRawDriver)
+    monkeypatch.setattr(playwright_base_module, "PlaywrightDriverAdapter", _unexpected_adapter)
+
+    scraper = ComputrabajoPlaywrightJobScraper(_settings(tmp_path))
+
+    html = scraper.fetch_search_results(_source("computrabajo_playwright", "https://computrabajo.example/jobs"))
+
+    output = capsys.readouterr().out
+    assert "Soporte de Aplicaciones Junior" in html
+    assert events == ["raw:1"]
+    assert "[computrabajo] using_raw_playwright=true" in output
+    assert "[computrabajo] adapter_bypassed=true" in output
+    assert "[computrabajo] isolated_mode_active=true" in output
 
 
 def test_linkedin_playwright_extracts_public_cards(tmp_path: Path):
@@ -509,20 +539,20 @@ def test_playwright_portals_are_registered(tmp_path: Path):
     assert source_uses_persistent_auth("linkedin_playwright") is True
 
 
-def test_computrabajo_playwright_captcha_is_reported(tmp_path: Path):
+def test_computrabajo_playwright_blocked_page_returns_empty(tmp_path: Path):
     source_url = "https://computrabajo.example/jobs"
     driver = _FakeDriver(
-        "<html><body><main><h1>Security Check</h1><p>captcha required</p></main></body></html>",
+        "<html><head><title>403 Forbidden</title></head><body><main><h1>Forbidden</h1><p>Access Denied</p></main></body></html>",
         current_url=source_url,
     )
     scraper = ComputrabajoPlaywrightJobScraper(_settings(tmp_path), driver_factory=lambda: driver)
 
-    with pytest.raises(CaptchaRequiredError):
-        scraper.scrape(_source("computrabajo_playwright", source_url))
+    jobs = scraper.scrape(_source("computrabajo_playwright", source_url))
 
+    assert jobs == []
     snapshot = scraper.get_last_debug_snapshot()
     assert snapshot is not None
-    assert "captcha" in snapshot.block_reason or "security check" in snapshot.block_reason
+    assert snapshot.block_reason == "computrabajo_403"
 
 
 def test_playwright_cli_login_subcommand_is_registered():
