@@ -20,6 +20,7 @@ CHROME_PROFILE_IN_USE_MESSAGE = (
 
 
 class SeleniumJobScraper(SelectorBasedScraper):
+    # deprecated legacy engine
     """Selector-based scraper that gets HTML through Selenium for public pages."""
 
     portal_name = "selenium"

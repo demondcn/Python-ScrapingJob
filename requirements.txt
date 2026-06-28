@@ -7,6 +7,7 @@ idna==3.13
 iniconfig==2.3.0
 lxml==6.1.0
 packaging==26.2
+playwright>=1.54.0
 pluggy==1.6.0
 Pygments==2.20.0
 pypdf==6.10.2

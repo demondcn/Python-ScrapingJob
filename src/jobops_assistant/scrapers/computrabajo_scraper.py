@@ -78,9 +78,12 @@ COMPUTRABAJO_NO_RESULTS_SIGNALS = (
     "no encontramos ofertas",
 )
 COMPUTRABAJO_PRIMARY_CARD_SELECTORS = (
-    "article",
-    "div.js-o-link",
     "div.box_offer",
+    ".js-card",
+    "article",
+    "[data-id]",
+    "div.ofer-descripcion",
+    "div.js-o-link",
 )
 COMPUTRABAJO_ALT_CARD_SELECTORS = (
     "div[class*='offer']",
@@ -130,9 +133,12 @@ COMPUTRABAJO_COMPANY_HINTS = (
     "services",
 )
 COMPUTRABAJO_READY_SELECTORS = (
-    "article",
-    "div.js-o-link",
     "div.box_offer",
+    ".js-card",
+    "article",
+    "[data-id]",
+    "div.ofer-descripcion",
+    "div.js-o-link",
     "a[href*='/oferta-de-trabajo']",
     "a[href*='/trabajo-']",
     "a[href*='/ofertas/']",
@@ -218,6 +224,9 @@ def _collect_nodes_from_candidates(candidates: list[Tag]) -> list[Tag]:
     for candidate in candidates:
         anchors = _iter_relevant_anchors(candidate)
         if not anchors:
+            fallback_anchor = _first_fallback_anchor(candidate)
+            if fallback_anchor is not None:
+                nodes.append(_find_job_container(fallback_anchor))
             continue
         if len(anchors) == 1:
             nodes.append(candidate)
@@ -294,7 +303,42 @@ def _first_relevant_anchor(node: BeautifulSoup | Tag) -> Tag | None:
     anchors = _iter_relevant_anchors(node)
     if anchors:
         return anchors[0]
-    return None
+    return _first_fallback_anchor(node)
+
+
+def _first_fallback_anchor(node: BeautifulSoup | Tag) -> Tag | None:
+    if not isinstance(node, (BeautifulSoup, Tag)):
+        return None
+    if isinstance(node, Tag) and node.name == "a" and node.has_attr("href"):
+        href = str(node.get("href", "")).strip()
+        if _normalize_job_href(href):
+            return node
+    if isinstance(node, Tag) and not _looks_like_known_job_container(node):
+        return None
+    match = node.select_one("a[href]")
+    if not isinstance(match, Tag):
+        return None
+    href = str(match.get("href", "")).strip()
+    if not _normalize_job_href(href):
+        return None
+    return match
+
+
+def _looks_like_known_job_container(node: Tag) -> bool:
+    if node.name == "article" or node.has_attr("data-id"):
+        return True
+    classes = " ".join(str(value) for value in node.get("class", [])).casefold()
+    return any(
+        token in classes
+        for token in (
+            "box_offer",
+            "js-card",
+            "ofer-descripcion",
+            "offer",
+            "job",
+            "result",
+        )
+    )
 
 
 def _normalize_job_href(href: str) -> str:
@@ -384,13 +428,59 @@ class ComputrabajoJobScraper(SeleniumJobScraper):
     captcha_error_message = "Computrabajo solicito captcha o verificacion. Se omite esta fuente."
     login_error_message = "Computrabajo requiere login para continuar. Se omite esta fuente."
     card_selectors = COMPUTRABAJO_PRIMARY_CARD_SELECTORS
-    title_selectors = ("h2 a", "h2", ".title")
-    company_selectors = (".fs16.fc_base.mt5", ".it-company", ".company")
-    location_selectors = (".fs13.fc_aux.mt15", ".it-location", ".location")
-    link_selectors = ("h2 a[href]", "a.js-o-link[href]", "a[href]")
+    title_selectors = (
+        "h2 a",
+        "h2",
+        ".title",
+        ".box_offer h2 a",
+        ".js-card h2 a",
+        "article h2 a",
+        "[data-id] h2 a",
+        "div.ofer-descripcion a[href]",
+    )
+    company_selectors = (
+        ".fs16.fc_base.mt5",
+        ".it-company",
+        ".company",
+        ".box_offer [class*='company']",
+        ".js-card [class*='company']",
+        "[data-id] [class*='company']",
+        "[class*='empresa']",
+    )
+    location_selectors = (
+        ".fs13.fc_aux.mt15",
+        ".it-location",
+        ".location",
+        ".box_offer [class*='location']",
+        ".js-card [class*='location']",
+        "[data-id] [class*='location']",
+        "[class*='ciudad']",
+        "[class*='ubicacion']",
+    )
+    link_selectors = (
+        "h2 a[href]",
+        "a.js-o-link[href]",
+        ".box_offer a[href]",
+        ".js-card a[href]",
+        "div.ofer-descripcion a[href]",
+        "a[href]",
+    )
     posted_selectors = (".fc_aux.fs13", ".it-posted", "time")
-    description_selectors = (".mb10", ".description")
-    salary_selectors = (".tag.base.mb10", ".salary", ".it-salary")
+    description_selectors = (
+        ".mb10",
+        ".description",
+        "div.ofer-descripcion",
+        ".box_offer p",
+        ".js-card p",
+    )
+    salary_selectors = (
+        ".tag.base.mb10",
+        ".salary",
+        ".it-salary",
+        ".box_offer [class*='salary']",
+        ".js-card [class*='salary']",
+        "[data-id] [class*='salary']",
+    )
 
     def __init__(self, settings, driver_factory=None, *, log_selenium: bool = True) -> None:
         super().__init__(settings, driver_factory=driver_factory, log_selenium=log_selenium)

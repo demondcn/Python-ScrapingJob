@@ -446,7 +446,7 @@ def _pick_application_type(primary: str, secondary: str) -> str:
 def _scraped_job_requires_linkedin_easy_apply(job: ScrapedJob, settings) -> bool:
     if not getattr(settings, "linkedin_only_easy_apply", False):
         return False
-    return (job.portal or "").casefold() == "linkedin_selenium" and job.application_type != LINKEDIN_EASY_APPLY
+    return (job.portal or "").casefold() in {"linkedin", "linkedin_selenium", "linkedin_playwright"} and job.application_type != LINKEDIN_EASY_APPLY
 
 
 def _ensure_utc(dt: datetime | None) -> datetime | None:

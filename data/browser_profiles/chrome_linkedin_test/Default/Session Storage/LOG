@@ -1,15 +1,3 @@
-2026/06/27-21:46:47.040 4548 Reusing MANIFEST C:\Users\demondcn\Documents\proyecto trabajo conseguir xd\data\browser_profiles\chrome_linkedin_test\Default\Session Storage/MANIFEST-000001
-2026/06/27-21:46:47.041 4548 Recovering log #1333
-2026/06/27-21:46:47.044 4548 Reusing old log C:\Users\demondcn\Documents\proyecto trabajo conseguir xd\data\browser_profiles\chrome_linkedin_test\Default\Session Storage/001333.log 
-2026/06/27-21:47:53.418 2b48 Level-0 table #1337: started
-2026/06/27-21:47:53.425 2b48 Level-0 table #1337: 14537 bytes OK
-2026/06/27-21:47:53.429 2b48 Delete type=0 #1333
-2026/06/27-21:47:53.430 4548 Compacting 4@0 + 1@1 files
-2026/06/27-21:47:53.496 4548 Generated table #1338@0: 96522 keys, 1380113 bytes
-2026/06/27-21:47:53.496 4548 Compacted 4@0 + 1@1 files => 1380113 bytes
-2026/06/27-21:47:53.499 4548 compacted to: files[ 0 1 1 0 0 0 0 ]
-2026/06/27-21:47:53.499 4548 Delete type=2 #1325
-2026/06/27-21:47:53.499 4548 Delete type=2 #1328
-2026/06/27-21:47:53.499 4548 Delete type=2 #1331
-2026/06/27-21:47:53.499 4548 Delete type=2 #1334
-2026/06/27-21:47:53.499 4548 Delete type=2 #1337
+2026/06/28-01:01:38.242 2cb8 Reusing MANIFEST C:\Users\demondcn\Documents\proyecto trabajo conseguir xd\data\browser_profiles\chrome_linkedin_test\Default\Session Storage/MANIFEST-000001
+2026/06/28-01:01:38.243 2cb8 Recovering log #1336
+2026/06/28-01:01:38.245 2cb8 Reusing old log C:\Users\demondcn\Documents\proyecto trabajo conseguir xd\data\browser_profiles\chrome_linkedin_test\Default\Session Storage/001336.log 

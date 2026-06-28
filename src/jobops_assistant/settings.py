@@ -6,6 +6,8 @@ import os
 
 from dotenv import load_dotenv
 
+DEFAULT_PLAYWRIGHT_USER_DATA_DIR = "./data/browser_profiles/playwright_linkedin"
+
 
 @dataclass(slots=True)
 class Settings:
@@ -31,6 +33,12 @@ class Settings:
     selenium_max_scrolls: int = 5
     selenium_user_data_dir: str = ""
     selenium_profile_directory: str = ""
+    enable_playwright: bool = True
+    playwright_headless: bool = True
+    playwright_user_data_dir: str = DEFAULT_PLAYWRIGHT_USER_DATA_DIR
+    playwright_page_load_timeout: int = 30
+    playwright_scroll_pause: int = 3
+    playwright_max_scrolls: int = 5
     linkedin_fetch_details: bool = False
     linkedin_only_easy_apply: bool = False
     notify_after_each_source: bool = False
@@ -82,6 +90,15 @@ def load_settings() -> Settings:
         selenium_max_scrolls=int(os.getenv("JOBOPS_SELENIUM_MAX_SCROLLS", "5")),
         selenium_user_data_dir=os.getenv("JOBOPS_SELENIUM_USER_DATA_DIR", "").strip(),
         selenium_profile_directory=os.getenv("JOBOPS_SELENIUM_PROFILE_DIRECTORY", "").strip(),
+        enable_playwright=_parse_bool(os.getenv("JOBOPS_ENABLE_PLAYWRIGHT", "true")),
+        playwright_headless=_parse_bool(os.getenv("JOBOPS_PLAYWRIGHT_HEADLESS", "true")),
+        playwright_user_data_dir=os.getenv(
+            "JOBOPS_PLAYWRIGHT_USER_DATA_DIR",
+            DEFAULT_PLAYWRIGHT_USER_DATA_DIR,
+        ).strip(),
+        playwright_page_load_timeout=int(os.getenv("JOBOPS_PLAYWRIGHT_PAGE_LOAD_TIMEOUT", "30")),
+        playwright_scroll_pause=int(os.getenv("JOBOPS_PLAYWRIGHT_SCROLL_PAUSE", "3")),
+        playwright_max_scrolls=int(os.getenv("JOBOPS_PLAYWRIGHT_MAX_SCROLLS", "5")),
         linkedin_fetch_details=_parse_bool(os.getenv("JOBOPS_LINKEDIN_FETCH_DETAILS", "false")),
         linkedin_only_easy_apply=_parse_bool(os.getenv("JOBOPS_LINKEDIN_ONLY_EASY_APPLY", "false")),
         notify_after_each_source=_parse_bool(os.getenv("JOBOPS_NOTIFY_AFTER_EACH_SOURCE", "false")),

@@ -100,7 +100,7 @@ def _apply_sqlite_migrations(engine) -> None:
                 text(
                     "SELECT id, portal, search_url, keywords, location "
                     "FROM job_search_sources "
-                    "WHERE lower(portal) IN ('linkedin', 'linkedin_selenium')"
+                    "WHERE lower(portal) IN ('linkedin', 'linkedin_selenium', 'linkedin_playwright')"
                 )
             ).mappings()
             for row in rows:

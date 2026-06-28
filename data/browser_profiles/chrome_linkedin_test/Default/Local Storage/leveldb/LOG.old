@@ -1,3 +1,6 @@
-2026/06/25-11:11:51.068 2098 Reusing MANIFEST C:\Users\demondcn\Documents\proyecto trabajo conseguir xd\data\browser_profiles\chrome_linkedin_test\Default\Local Storage\leveldb/MANIFEST-000001
-2026/06/25-11:11:51.072 2098 Recovering log #692
-2026/06/25-11:11:51.074 2098 Reusing old log C:\Users\demondcn\Documents\proyecto trabajo conseguir xd\data\browser_profiles\chrome_linkedin_test\Default\Local Storage\leveldb/000692.log 
+2026/06/28-00:36:18.925 37d0 Reusing MANIFEST C:\Users\demondcn\Documents\proyecto trabajo conseguir xd\data\browser_profiles\chrome_linkedin_test\Default\Local Storage\leveldb/MANIFEST-000001
+2026/06/28-00:36:18.930 37d0 Recovering log #692
+2026/06/28-00:36:18.932 37d0 Reusing old log C:\Users\demondcn\Documents\proyecto trabajo conseguir xd\data\browser_profiles\chrome_linkedin_test\Default\Local Storage\leveldb/000692.log 
+2026/06/28-00:36:45.537 5ab0 Level-0 table #696: started
+2026/06/28-00:36:45.543 5ab0 Level-0 table #696: 24251 bytes OK
+2026/06/28-00:36:45.545 5ab0 Delete type=0 #692

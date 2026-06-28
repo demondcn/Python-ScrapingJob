@@ -17,7 +17,7 @@ from src.jobops_assistant.search_sources import add_source, get_due_sources, get
 from src.jobops_assistant.settings import Settings
 
 
-def _settings(tmp_path: Path, *, enable_selenium: bool = False) -> Settings:
+def _settings(tmp_path: Path, *, enable_playwright: bool = True) -> Settings:
     return Settings(
         db_path=tmp_path / "monitor.db",
         match_threshold=65,
@@ -33,11 +33,11 @@ def _settings(tmp_path: Path, *, enable_selenium: bool = False) -> Settings:
         telegram_max_message_chars=3500,
         templates_dir=tmp_path / "templates",
         generated_dir=tmp_path / "generated",
-        enable_selenium=enable_selenium,
-        selenium_headless=True,
-        selenium_page_load_timeout=1,
-        selenium_scroll_pause=0,
-        selenium_max_scrolls=0,
+        enable_playwright=enable_playwright,
+        playwright_headless=True,
+        playwright_page_load_timeout=1,
+        playwright_scroll_pause=0,
+        playwright_max_scrolls=0,
     )
 
 
@@ -343,7 +343,7 @@ def test_successful_source_resets_failure_state(tmp_path: Path, monkeypatch):
 
 
 def test_source_not_paused_on_scraper_broken(tmp_path: Path, monkeypatch, caplog):
-    settings = _settings(tmp_path, enable_selenium=True)
+    settings = _settings(tmp_path, enable_playwright=True)
     engine = create_sqlite_engine(settings.db_path)
     init_db(engine)
     html = "<html><body>" + ("<div>contenido visible sin cards</div>" * 80) + "</body></html>"
@@ -455,7 +455,7 @@ def test_monitor_accepts_linkedin_easy_apply_when_only_easy_apply_is_enabled(tmp
     with Session(engine) as session:
         source = add_source(
             session,
-            portal="linkedin_selenium",
+            portal="linkedin_playwright",
             target_role="backend_junior",
             search_url="https://linkedin.example/jobs",
             interval_minutes=15,
@@ -464,7 +464,7 @@ def test_monitor_accepts_linkedin_easy_apply_when_only_easy_apply_is_enabled(tmp
         job = ScrapedJob(
             title="Backend Junior",
             company="Acme API",
-            portal="linkedin_selenium",
+            portal="linkedin_playwright",
             location="Colombia",
             modality="Remoto",
             salary="",
@@ -490,7 +490,7 @@ def test_monitor_accepts_linkedin_easy_apply_when_only_easy_apply_is_enabled(tmp
 
         offers = list_offers(session)
         assert len(offers) == 1
-        assert offers[0].portal == "linkedin_selenium"
+        assert offers[0].portal == "linkedin_playwright"
         assert offers[0].application_type == LINKEDIN_EASY_APPLY
         assert list_discarded_jobs(session, limit=None) == []
         assert calls == [[offers[0].id]]
@@ -507,7 +507,7 @@ def test_monitor_discards_linkedin_external_apply_when_only_easy_apply_is_enable
     with Session(engine) as session:
         source = add_source(
             session,
-            portal="linkedin_selenium",
+            portal="linkedin_playwright",
             target_role="backend_junior",
             search_url="https://linkedin.example/jobs",
             interval_minutes=15,
@@ -516,7 +516,7 @@ def test_monitor_discards_linkedin_external_apply_when_only_easy_apply_is_enable
         job = ScrapedJob(
             title="Backend Junior",
             company="Acme API",
-            portal="linkedin_selenium",
+            portal="linkedin_playwright",
             location="Colombia",
             modality="Remoto",
             salary="",
@@ -559,7 +559,7 @@ def test_monitor_discards_linkedin_unknown_apply_when_only_easy_apply_is_enabled
     with Session(engine) as session:
         source = add_source(
             session,
-            portal="linkedin_selenium",
+            portal="linkedin_playwright",
             target_role="backend_junior",
             search_url="https://linkedin.example/jobs",
             interval_minutes=15,
@@ -568,7 +568,7 @@ def test_monitor_discards_linkedin_unknown_apply_when_only_easy_apply_is_enabled
         job = ScrapedJob(
             title="Backend Junior",
             company="Acme API",
-            portal="linkedin_selenium",
+            portal="linkedin_playwright",
             location="Colombia",
             modality="Remoto",
             salary="",

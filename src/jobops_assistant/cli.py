@@ -11,6 +11,8 @@ from .ats_resume_builder import build_ats_filename, build_ats_resume, get_availa
 from .cv_generator import generate_cv, register_generated_cv
 from .database import create_session_factory, create_sqlite_engine, init_db
 from .discarded_job_service import (
+    analyze_linkedin_application_type_for_discard,
+    analyze_scraped_job_for_discard,
     count_discarded_jobs,
     clear_discarded_jobs,
     export_discarded_jobs,
@@ -38,10 +40,17 @@ from .models import JobSearchSource
 from .profile_service import get_profile, upsert_profile
 from .resume_profile_service import DEFAULT_RESUME_PROFILE_PATH, load_resume_profile, save_resume_profile
 from .resume_reader import read_resume_file
-from .scrapers.linkedin_selenium_scraper import build_linkedin_jobs_url
-from .scrapers.registry import list_supported_portals
-from .scrapers.selenium_base import SeleniumJobScraper
+from .linkedin_url import build_linkedin_jobs_url
+from .scrapers.playwright_base import DEFAULT_PLAYWRIGHT_USER_DATA_DIR, PlaywrightBrowserSession
+from .scrapers.registry import (
+    get_runtime_portal_name,
+    get_scraper,
+    is_deprecated_portal_alias,
+    list_supported_portals,
+    source_uses_persistent_auth,
+)
 from .search_sources import (
+    SourceTestResult,
     add_source,
     disable_blocked_sources,
     get_source_by_id,
@@ -58,6 +67,10 @@ from .telegram_notifier import format_job_alert, send_job_alert
 from .workflows import run_daily_scan
 
 DEFAULT_DISCARDED_LIST_LIMIT = 20
+LINKEDIN_PLAYWRIGHT_LOGIN_URL = "https://www.linkedin.com/login"
+LINKEDIN_PLAYWRIGHT_FEED_URL = "https://www.linkedin.com/feed/"
+LINKEDIN_PLAYWRIGHT_SESSION_SAVED_MESSAGE = "LinkedIn session saved successfully"
+LINKEDIN_PLAYWRIGHT_SESSION_AVAILABLE_MESSAGE = "Session already available, opening LinkedIn feed instead"
 LINKEDIN_HOME_URL = "https://www.linkedin.com/"
 LINKEDIN_LOGIN_PROFILE_MESSAGE = "Inicia sesión manualmente en LinkedIn y luego cierra Chrome."
 
@@ -217,7 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     sources_disable_blocked = sources_sub.add_parser("disable-blocked", help="Desactiva fuentes con bloqueos repetidos")
     sources_disable_blocked.set_defaults(handler=_handle_sources_disable_blocked)
 
-    selenium_parser = subparsers.add_parser("selenium", help="Prueba scrapers opcionales con Selenium")
+    selenium_parser = subparsers.add_parser("selenium", help="deprecated legacy engine; redirige a Playwright")
     selenium_sub = selenium_parser.add_subparsers(dest="selenium_command", required=True)
     selenium_test = selenium_sub.add_parser("test", help="Prueba una URL publica con Selenium sin guardar resultados")
     selenium_test.add_argument("--portal", required=True, choices=("indeed", "linkedin", "indeed_selenium", "linkedin_selenium"))
@@ -240,7 +253,46 @@ def build_parser() -> argparse.ArgumentParser:
     selenium_test.add_argument("--target-role", required=True)
     selenium_test.set_defaults(handler=_handle_selenium_test)
 
-    linkedin_parser = subparsers.add_parser("linkedin", help="Utilidades de LinkedIn con perfil local de Chrome")
+    playwright_parser = subparsers.add_parser("playwright", help="Prueba scrapers opcionales con Playwright")
+    playwright_sub = playwright_parser.add_subparsers(dest="playwright_command", required=True)
+    playwright_test = playwright_sub.add_parser("test", help="Prueba una URL publica con Playwright sin guardar resultados")
+    playwright_test.add_argument(
+        "--portal",
+        required=True,
+        choices=(
+            "indeed",
+            "linkedin",
+            "computrabajo",
+            "indeed_playwright",
+            "linkedin_playwright",
+            "computrabajo_playwright",
+        ),
+    )
+    playwright_test.add_argument("--url")
+    playwright_test.add_argument("--keyword")
+    playwright_test.add_argument("--location")
+    playwright_test.add_argument("--date-posted", default="24h", choices=("any", "24h", "week", "month"))
+    playwright_test.add_argument(
+        "--experience-level",
+        dest="experience_levels",
+        action="append",
+        choices=("internship", "entry_level", "associate"),
+    )
+    playwright_test.add_argument(
+        "--workplace",
+        dest="workplace_types",
+        action="append",
+        choices=("onsite", "remote", "hybrid"),
+    )
+    playwright_test.add_argument("--target-role", required=True)
+    playwright_test.set_defaults(handler=_handle_playwright_test)
+    playwright_login = playwright_sub.add_parser(
+        "login",
+        help="Abre LinkedIn con Playwright persistente para iniciar sesion manualmente",
+    )
+    playwright_login.set_defaults(handler=_handle_playwright_login)
+
+    linkedin_parser = subparsers.add_parser("linkedin", help="Utilidades legacy de LinkedIn; redirigen a Playwright")
     linkedin_sub = linkedin_parser.add_subparsers(dest="linkedin_command", required=True)
     linkedin_login_profile = linkedin_sub.add_parser(
         "login-profile",
@@ -644,6 +696,8 @@ def _handle_discarded_export(args, session: Session, settings, session_factory) 
 
 def _handle_sources_add(args, session: Session, settings, session_factory) -> int:
     portal = args.portal.strip().lower()
+    if is_deprecated_portal_alias(portal):
+        portal = get_runtime_portal_name(portal)
     if portal not in list_supported_portals():
         print(f"Portal no soportado: {portal}")
         print("Disponibles: " + ", ".join(list_supported_portals()))
@@ -837,9 +891,16 @@ def _handle_sources_disable_blocked(args, session: Session, settings, session_fa
 
 
 def _handle_selenium_test(args, session: Session, settings, session_factory) -> int:
-    portal = _normalize_selenium_portal(args.portal)
+    print("Selenium CLI deprecated legacy engine. Redirecting to Playwright.")
+    delegated_args = argparse.Namespace(**vars(args))
+    delegated_args.portal = _normalize_playwright_portal(args.portal)
+    return _handle_playwright_test(delegated_args, session, settings, session_factory)
+
+
+def _handle_playwright_test(args, session: Session, settings, session_factory) -> int:
+    portal = _normalize_playwright_portal(args.portal)
     try:
-        search_url = _resolve_selenium_test_url(args, portal)
+        search_url = _resolve_playwright_test_url(args, portal)
     except ValueError as exc:
         print(str(exc))
         return 1
@@ -852,9 +913,14 @@ def _handle_selenium_test(args, session: Session, settings, session_factory) -> 
         enabled=True,
         interval_minutes=max(30, settings.min_monitor_interval_minutes),
     )
-    result = test_source(settings, source)
+    if portal == "linkedin_playwright":
+        source.interactive_login = True
+    result, scraper = _run_source_test_with_scraper(settings, source)
     print(f"Portal: {portal}")
     print(f"URL: {source.search_url}")
+    if portal == "linkedin_playwright":
+        print(f"Sesion activa: {'yes' if getattr(scraper, 'session_active', False) else 'no'}")
+        print(f"Modo LinkedIn: {getattr(scraper, 'session_mode', 'public')}")
     if result.error:
         print(f"Error: {result.error}")
         return 1
@@ -872,14 +938,49 @@ def _handle_selenium_test(args, session: Session, settings, session_factory) -> 
     return 0
 
 
+def _handle_playwright_login(args, session: Session, settings, session_factory) -> int:
+    browser_session = None
+    try:
+        if not source_uses_persistent_auth("linkedin_playwright"):
+            print("linkedin_playwright no esta configurado como fuente autenticada.")
+            return 1
+        browser_session = _build_playwright_linkedin_session(settings)
+        target_url = LINKEDIN_PLAYWRIGHT_LOGIN_URL
+        if _playwright_linkedin_session_is_available(browser_session):
+            print(LINKEDIN_PLAYWRIGHT_SESSION_AVAILABLE_MESSAGE)
+            target_url = LINKEDIN_PLAYWRIGHT_FEED_URL
+        page = browser_session.get_page(target_url)
+        _wait_for_playwright_browser_close(browser_session, page)
+        _persist_playwright_session_state(browser_session)
+        print(LINKEDIN_PLAYWRIGHT_SESSION_SAVED_MESSAGE)
+        return 0
+    except Exception as exc:
+        print(str(exc))
+        return 1
+    finally:
+        if browser_session is not None:
+            try:
+                browser_session.close()
+            except Exception:
+                pass
+
+
 def _normalize_selenium_portal(portal: str) -> str:
+    return _normalize_playwright_portal(portal)
+
+
+def _normalize_playwright_portal(portal: str) -> str:
     normalized = portal.strip().lower()
-    if normalized in {"indeed", "linkedin"}:
-        return f"{normalized}_selenium"
+    if normalized in {"indeed", "linkedin", "computrabajo"}:
+        return f"{normalized}_playwright"
     return normalized
 
 
 def _resolve_selenium_test_url(args, portal: str) -> str:
+    return _resolve_playwright_test_url(args, _normalize_playwright_portal(portal))
+
+
+def _resolve_playwright_test_url(args, portal: str) -> str:
     explicit_url = (getattr(args, "url", None) or "").strip()
     if explicit_url:
         return normalize_linkedin_source_url(
@@ -888,7 +989,7 @@ def _resolve_selenium_test_url(args, portal: str) -> str:
             keywords=getattr(args, "keyword", "") or "",
             location=getattr(args, "location", "") or "",
         )
-    if portal != "linkedin_selenium":
+    if portal != "linkedin_playwright":
         raise ValueError("Debes indicar --url para este portal.")
     return build_linkedin_jobs_url(
         getattr(args, "keyword", "") or "",
@@ -899,56 +1000,101 @@ def _resolve_selenium_test_url(args, portal: str) -> str:
     )
 
 
-def _handle_linkedin_login_profile(args, session: Session, settings, session_factory) -> int:
-    driver = None
+def _run_source_test_with_scraper(settings, source: JobSearchSource) -> tuple[SourceTestResult, object]:
+    scraper = get_scraper(source.portal, settings)
     try:
-        driver = _build_linkedin_profile_driver(settings)
-        _navigate_linkedin_profile_driver(driver, LINKEDIN_HOME_URL)
-        print(LINKEDIN_LOGIN_PROFILE_MESSAGE)
-        _wait_for_linkedin_profile_browser_close(driver)
-        return 0
+        raw_offers = scraper.scrape(source)
+        offers = []
+        discarded = []
+        for offer in raw_offers:
+            discarded_review = analyze_linkedin_application_type_for_discard(offer, settings)
+            if discarded_review is None:
+                discarded_review = analyze_scraped_job_for_discard(
+                    offer,
+                    target_role=source.target_role,
+                    profile=None,
+                )
+            if discarded_review is None:
+                offers.append(offer)
+            else:
+                discarded.append(discarded_review)
+        return (
+            SourceTestResult(
+                source=source,
+                offers=offers,
+                discarded=discarded,
+                debug_snapshot=scraper.get_last_debug_snapshot(),
+            ),
+            scraper,
+        )
     except Exception as exc:
-        print(str(exc))
-        return 1
-    finally:
-        if driver is not None:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+        return (
+            SourceTestResult(
+                source=source,
+                offers=[],
+                error=str(exc),
+                debug_snapshot=scraper.get_last_debug_snapshot(),
+                discarded=[],
+            ),
+            scraper,
+        )
+
+
+def _build_playwright_linkedin_session(settings):
+    user_data_dir = str(getattr(settings, "playwright_user_data_dir", "") or "").strip() or DEFAULT_PLAYWRIGHT_USER_DATA_DIR
+    return PlaywrightBrowserSession(
+        settings,
+        headless=False,
+        user_data_dir=user_data_dir,
+    )
+
+
+def _playwright_linkedin_session_is_available(browser_session) -> bool:
+    checker = getattr(browser_session, "has_linkedin_session_cookie", None)
+    if callable(checker):
+        return bool(checker())
+    return False
+
+
+def _persist_playwright_session_state(browser_session) -> str:
+    saver = getattr(browser_session, "save_storage_state", None)
+    if not callable(saver):
+        return ""
+    try:
+        return str(saver() or "")
+    except Exception:
+        return ""
+
+
+def _wait_for_playwright_browser_close(browser_session, page, *, poll_seconds: float = 1.0) -> None:
+    while True:
+        try:
+            if hasattr(page, "is_closed") and callable(page.is_closed) and page.is_closed():
+                return
+        except Exception:
+            return
+        try:
+            page_count = getattr(browser_session, "page_count", None)
+            if callable(page_count) and page_count() <= 0:
+                return
+        except Exception:
+            return
+        time.sleep(poll_seconds)
+
+
+def _handle_linkedin_login_profile(args, session: Session, settings, session_factory) -> int:
+    print("LinkedIn Selenium login-profile deprecated legacy engine. Redirecting to Playwright.")
+    return _handle_playwright_login(args, session, settings, session_factory)
 
 
 def _handle_linkedin_profile_info(args, session: Session, settings, session_factory) -> int:
-    user_data_dir = SeleniumJobScraper._expand_chrome_setting(
-        getattr(settings, "selenium_user_data_dir", "")
-    )
-    profile_directory = str(getattr(settings, "selenium_profile_directory", "") or "").strip()
-    profile_path = Path(user_data_dir) / profile_directory if user_data_dir and profile_directory else Path(user_data_dir)
-    print(f"JOBOPS_SELENIUM_USER_DATA_DIR: {user_data_dir}")
-    print(f"JOBOPS_SELENIUM_PROFILE_DIRECTORY: {profile_directory}")
+    user_data_dir = str(getattr(settings, "playwright_user_data_dir", "") or "").strip() or DEFAULT_PLAYWRIGHT_USER_DATA_DIR
+    profile_path = Path(user_data_dir)
+    print("LinkedIn Selenium profile-info deprecated legacy engine. Showing Playwright profile instead.")
+    print(f"JOBOPS_PLAYWRIGHT_USER_DATA_DIR: {user_data_dir}")
     print(f"carpeta existe: {profile_path.exists()}")
-    print(f"JOBOPS_SELENIUM_HEADLESS: {settings.selenium_headless}")
+    print(f"JOBOPS_PLAYWRIGHT_HEADLESS: {settings.playwright_headless}")
     return 0
-
-
-def _build_linkedin_profile_driver(settings):
-    scraper = SeleniumJobScraper(settings, log_selenium=False)
-    return scraper._build_driver()
-
-
-def _navigate_linkedin_profile_driver(driver, url: str) -> None:
-    driver.get(url)
-
-
-def _wait_for_linkedin_profile_browser_close(driver, *, poll_seconds: float = 1.0) -> None:
-    while True:
-        try:
-            handles = driver.window_handles
-        except Exception:
-            return
-        if not handles:
-            return
-        time.sleep(poll_seconds)
 
 
 def _handle_monitor_fresh(args, session: Session, settings, session_factory) -> int:

@@ -86,7 +86,7 @@ def test_add_source_normalizes_linkedin_search_url(tmp_path: Path):
     with Session(engine) as session:
         source = add_source(
             session,
-            portal="linkedin_selenium",
+            portal="linkedin_playwright",
             target_role="backend_junior",
             search_url=(
                 "https://www.linkedin.com/jobs/search/?keywords=Backend%20Junior"
@@ -122,7 +122,7 @@ def test_init_db_normalizes_existing_linkedin_source_urls(tmp_path: Path):
             ),
             {
                 "id": 1,
-                "portal": "linkedin_selenium",
+                "portal": "linkedin_playwright",
                 "target_role": "backend_junior",
                 "search_url": (
                     "https://www.linkedin.com/jobs/search/?keywords=Backend%20Junior"

@@ -4,11 +4,18 @@ from datetime import UTC, datetime
 import re
 from time import sleep
 import unicodedata
-from urllib.parse import quote, urljoin
+from urllib.parse import urljoin
 
 from bs4 import Tag
 
-from ..linkedin_url import LINKEDIN_SEARCH_BASE_URL, build_linkedin_url
+from ..linkedin_url import (
+    DATE_POSTED_FILTERS,
+    EXPERIENCE_LEVEL_FILTERS,
+    LINKEDIN_SEARCH_BASE_URL,
+    WORKPLACE_TYPE_FILTERS,
+    build_linkedin_jobs_url,
+    build_linkedin_url,
+)
 from ..application_types import EXTERNAL_APPLY, LINKEDIN_EASY_APPLY, UNKNOWN_APPLICATION_TYPE
 from .base_scraper import CaptchaRequiredError, LoginRequiredError, ScrapedJob, SourceBlockedError
 from .selenium_base import SeleniumJobScraper
@@ -39,27 +46,6 @@ LINKEDIN_LOGGED_CARD_SELECTORS = (
     "a.job-card-list__title",
 )
 
-DATE_POSTED_FILTERS = {
-    "24h": "r86400",
-    "week": "r604800",
-    "month": "r2592000",
-}
-EXPERIENCE_LEVEL_FILTERS = {
-    "internship": "1",
-    "entry_level": "2",
-    "associate": "3",
-    "1": "1",
-    "2": "2",
-    "3": "3",
-}
-WORKPLACE_TYPE_FILTERS = {
-    "onsite": "1",
-    "remote": "2",
-    "hybrid": "3",
-    "1": "1",
-    "2": "2",
-    "3": "3",
-}
 LINKEDIN_EASY_APPLY_SIGNALS = (
     "solicitud sencilla",
     "solicitud simple",
@@ -207,74 +193,6 @@ def has_logged_in_linkedin_job_cards(soup) -> bool:
         "a[href*='/jobs/view/']",
     )
     return any(list_container.select_one(selector) for selector in item_selectors)
-
-
-def build_linkedin_jobs_url(
-    keyword: str,
-    location: str,
-    date_posted: str = "24h",
-    experience_levels: list[str] | tuple[str, ...] | str | None = None,
-    workplace_types: list[str] | tuple[str, ...] | str | None = None,
-) -> str:
-    keyword = (keyword or "").strip()
-    location = (location or "").strip()
-    if not keyword:
-        raise ValueError("Debes indicar --keyword para construir la URL de LinkedIn.")
-    if not location:
-        raise ValueError("Debes indicar --location para construir la URL de LinkedIn.")
-
-    params: list[tuple[str, str]] = []
-
-    normalized_date = (date_posted or "").strip().casefold()
-    date_code = ""
-    if normalized_date and normalized_date != "any":
-        date_code = DATE_POSTED_FILTERS.get(normalized_date)
-        if date_code is None:
-            supported = ", ".join(sorted([*DATE_POSTED_FILTERS, "any"]))
-            raise ValueError(f"date_posted no soportado: {date_posted}. Usa: {supported}.")
-        params.append(("f_TPR", date_code))
-
-    experience_codes = _map_filter_values(
-        experience_levels,
-        EXPERIENCE_LEVEL_FILTERS,
-        "experience_levels",
-    )
-    if experience_codes:
-        params.append(("f_E", ",".join(experience_codes)))
-
-    workplace_codes = _map_filter_values(
-        workplace_types,
-        WORKPLACE_TYPE_FILTERS,
-        "workplace_types",
-    )
-    if workplace_codes:
-        params.append(("f_WT", ",".join(workplace_codes)))
-
-    query = "&".join(f"{quote(key)}={quote(value, safe=',')}" for key, value in params)
-    base_url = LINKEDIN_SEARCH_BASE_URL if not query else f"{LINKEDIN_SEARCH_BASE_URL}?{query}"
-    return build_linkedin_url(base_url, keyword, location, date_code)
-
-
-def _map_filter_values(
-    values: list[str] | tuple[str, ...] | str | None,
-    mapping: dict[str, str],
-    label: str,
-) -> list[str]:
-    if values is None:
-        return []
-    raw_values = [values] if isinstance(values, str) else list(values)
-    mapped_values: list[str] = []
-    for raw_value in raw_values:
-        normalized = (raw_value or "").strip().casefold()
-        if not normalized:
-            continue
-        mapped = mapping.get(normalized)
-        if mapped is None:
-            supported = ", ".join(sorted(key for key in mapping if not key.isdigit()))
-            raise ValueError(f"{label} no soportado: {raw_value}. Usa: {supported}.")
-        if mapped not in mapped_values:
-            mapped_values.append(mapped)
-    return mapped_values
 
 
 def _collect_application_text(node: Tag) -> str:

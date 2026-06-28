@@ -32,7 +32,7 @@ from .scrapers.base_scraper import (
     ScrapedJob,
     SourceBlockedError,
 )
-from .scrapers.registry import get_scraper
+from .scrapers.registry import get_runtime_portal_name, get_scraper
 from .search_sources import (
     ensure_utc,
     get_due_sources,
@@ -104,12 +104,18 @@ def run_fresh_monitor(
         if is_source_paused(source, now=datetime.now(UTC)):
             logs.append(_build_paused_source_log(source))
             continue
-        logs.append(f"[{source.portal}] Revisando fuente {source.id}: {source.search_url}")
+        runtime_portal = get_runtime_portal_name(source.portal)
+        logs.append(f"[{runtime_portal}] Revisando fuente {source.id}: {source.search_url}")
         checked_at = datetime.now(UTC)
         try:
             scraper = get_scraper(source.portal, settings)
+            runtime_portal = getattr(scraper, "portal_name", runtime_portal)
             jobs = scraper.scrape(source)
-            stats = SourceRunStats(portal=source.portal, source_id=source.id, found=len(jobs))
+            stats = SourceRunStats(portal=runtime_portal, source_id=source.id, found=len(jobs))
+            logs.append(f"Portal: {runtime_portal}")
+            if runtime_portal == "linkedin_playwright":
+                logs.append(f"Sesion activa: {'yes' if getattr(scraper, 'session_active', False) else 'no'}")
+            logs.append(f"Ofertas detectadas: {len(jobs)}")
             processed_offer_ids: set[int] = set()
             queued_offer_ids: set[int] = set()
             source_digest_queue: dict[int, tuple[JobOffer, str | None]] = {}
@@ -118,7 +124,7 @@ def run_fresh_monitor(
                 if application_review is not None:
                     upsert_discarded_job(
                         session,
-                        portal=source.portal,
+                        portal=runtime_portal,
                         source_id=source.id,
                         target_role=source.target_role,
                         source_url=source.search_url,
@@ -134,7 +140,7 @@ def run_fresh_monitor(
                 if discarded_review is not None:
                     upsert_discarded_job(
                         session,
-                        portal=source.portal,
+                        portal=runtime_portal,
                         source_id=source.id,
                         target_role=source.target_role,
                         source_url=source.search_url,
@@ -197,7 +203,7 @@ def run_fresh_monitor(
             stats.queued_alerts = len(queued_offer_ids)
             update_source_check(session, source, checked_at=checked_at, error="")
             logs.append(
-                f"[{source.portal}] encontradas={stats.found} nuevas={stats.created} "
+                f"[{runtime_portal}] encontradas={stats.found} nuevas={stats.created} "
                 f"duplicados={stats.duplicates} descartadas={stats.discarded} pending_alerts={stats.pending_alerts} "
                 f"queued_alerts={stats.queued_alerts}"
             )
@@ -217,12 +223,12 @@ def run_fresh_monitor(
                 logs.append(_build_paused_source_log(failed_source))
             else:
                 logs.append(
-                    f"[{source.portal}] Error: {exc} "
+                    f"[{runtime_portal}] Error: {exc} "
                     f"(fallos={failed_source.failure_count}/{3})"
                 )
         except Exception as exc:
             update_source_check(session, source, checked_at=checked_at, error=str(exc))
-            logs.append(f"[{source.portal}] Error: {exc}")
+            logs.append(f"[{runtime_portal}] Error: {exc}")
 
     if notify_after_each_source:
         logs.extend(_send_final_digest_after_immediate(session, settings, digest_queue))
@@ -521,7 +527,7 @@ def _should_notify_offer(offer: JobOffer, job: ScrapedJob, settings: Settings) -
 def _offer_passes_linkedin_application_filter(offer: JobOffer, settings: Settings) -> bool:
     if not getattr(settings, "linkedin_only_easy_apply", False):
         return True
-    if (offer.portal or "").casefold() != "linkedin_selenium":
+    if (offer.portal or "").casefold() not in {"linkedin", "linkedin_selenium", "linkedin_playwright"}:
         return True
     return offer.application_type == LINKEDIN_EASY_APPLY
 
@@ -542,4 +548,5 @@ def _build_paused_source_log(source: JobSearchSource) -> str:
     paused_until = ensure_utc(source.paused_until)
     paused_label = paused_until.strftime("%Y-%m-%d %H:%M") if paused_until else "desconocido"
     reason = source.last_error or "bloqueo repetido"
-    return f"[{source.portal}] fuente {source.id} pausada hasta {paused_label} por {reason}"
+    portal = get_runtime_portal_name(source.portal)
+    return f"[{portal}] fuente {source.id} pausada hasta {paused_label} por {reason}"

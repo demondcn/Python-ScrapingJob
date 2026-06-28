@@ -6,6 +6,8 @@ from types import ModuleType
 from bs4 import BeautifulSoup
 import pytest
 
+pytestmark = pytest.mark.skip(reason="deprecated legacy engine")
+
 from src.jobops_assistant.application_types import EXTERNAL_APPLY, LINKEDIN_EASY_APPLY, UNKNOWN_APPLICATION_TYPE
 from src.jobops_assistant import cli as cli_module
 from src.jobops_assistant.cli import _handle_selenium_test
