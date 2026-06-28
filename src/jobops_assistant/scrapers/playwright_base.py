@@ -15,6 +15,12 @@ PLAYWRIGHT_PROFILE_IN_USE_MESSAGE = (
     "El perfil persistente de Playwright esta en uso. Cierra las ventanas del navegador o usa otra carpeta."
 )
 LINKEDIN_SESSION_COOKIE_NAMES = {"li_at", "liap", "JSESSIONID"}
+RAW_PLAYWRIGHT_PORTALS = {"computrabajo", "computrabajo_playwright"}
+
+
+def _emit_driver_log(enabled: bool, message: str) -> None:
+    if enabled:
+        print(message)
 
 
 class PlaywrightElementAdapter:
@@ -330,6 +336,136 @@ class PlaywrightDriverAdapter:
         self.session.close()
 
 
+class RawPlaywrightDriver:
+    def __init__(
+        self,
+        settings,
+        *,
+        log_playwright: bool = True,
+    ) -> None:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:  # pragma: no cover - exercised via friendly error path.
+            raise SourceBlockedError(PLAYWRIGHT_INSTALL_MESSAGE) from exc
+
+        self.settings = settings
+        self.log_playwright = log_playwright
+        self.timeout = max(
+            1,
+            int(getattr(settings, "playwright_page_load_timeout", getattr(settings, "scraper_timeout", 20)) or 1),
+        )
+        self.timeout_ms = self.timeout * 1000
+        self.current_url = ""
+        self.last_status_code: int | None = None
+        self.quit_called = False
+        self._page_source = ""
+        self._playwright = sync_playwright().start()
+        self._browser = self._playwright.chromium.launch(headless=False)
+        self._context = self._browser.new_context()
+        self._page = self._context.new_page()
+        self.set_page_load_timeout(self.timeout)
+
+    @property
+    def page_source(self) -> str:
+        return self._page_source
+
+    def set_page_load_timeout(self, timeout: int) -> None:
+        self.timeout = max(1, int(timeout or 1))
+        self.timeout_ms = self.timeout * 1000
+        try:
+            self._page.set_default_timeout(self.timeout_ms)
+            self._page.set_default_navigation_timeout(self.timeout_ms)
+        except Exception:
+            pass
+
+    def get(self, url: str) -> None:
+        response = self._page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+        self.current_url = str(getattr(self._page, "url", "") or url)
+        self.last_status_code = getattr(response, "status", None) if response is not None else None
+        self._page_source = str(self._page.content() or "")
+
+    def execute_script(self, script: str) -> None:
+        try:
+            self._page.evaluate(script)
+        except Exception:
+            try:
+                self._page.mouse.wheel(0, 2400)
+            except Exception:
+                pass
+        self._page_source = str(self._page.content() or self._page_source)
+        sleep(0.1)
+
+    def find_elements(self, by, selector: str):
+        if not selector:
+            return []
+        try:
+            locator = self._page.locator(selector)
+            count = locator.count()
+        except Exception:
+            return []
+        return [PlaywrightElementAdapter(locator.nth(index)) for index in range(count)]
+
+    def wait_for_any_selector(self, selectors: tuple[str, ...], *, timeout: int) -> bool:
+        timeout_ms = max(1, int(timeout or self.timeout)) * 1000
+        for selector in selectors:
+            try:
+                self._page.wait_for_selector(selector, state="attached", timeout=timeout_ms)
+                self._page_source = str(self._page.content() or self._page_source)
+                self.current_url = str(getattr(self._page, "url", "") or self.current_url)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def wait_for_load_state(self, state: str = "load", *, timeout: int | None = None) -> bool:
+        timeout_ms = max(1, int(timeout or self.timeout)) * 1000
+        try:
+            self._page.wait_for_load_state(state, timeout=timeout_ms)
+            self._page_source = str(self._page.content() or self._page_source)
+            self.current_url = str(getattr(self._page, "url", "") or self.current_url)
+            return True
+        except Exception:
+            return False
+
+    def wait_for_timeout(self, seconds: float) -> None:
+        delay_ms = max(0, int(float(seconds or 0) * 1000))
+        if delay_ms <= 0:
+            return
+        self._page.wait_for_timeout(delay_ms)
+        self._page_source = str(self._page.content() or self._page_source)
+        self.current_url = str(getattr(self._page, "url", "") or self.current_url)
+
+    def get_title(self) -> str:
+        try:
+            return str(self._page.title() or "")
+        except Exception:
+            return ""
+
+    def quit(self) -> None:
+        self.quit_called = True
+        try:
+            self._context.close()
+        except Exception:
+            pass
+        try:
+            self._browser.close()
+        except Exception:
+            pass
+        try:
+            self._playwright.stop()
+        except Exception:
+            pass
+
+
+def build_playwright_driver(settings, portal_name: str, *, log_playwright: bool = True):
+    normalized_portal = str(portal_name or "").strip().casefold()
+    if normalized_portal in RAW_PLAYWRIGHT_PORTALS:
+        _emit_driver_log(log_playwright, "[driver] computrabajo_adapter_bypassed=true")
+        _emit_driver_log(log_playwright, "[driver] using_raw_playwright_only=true")
+        return RawPlaywrightDriver(settings, log_playwright=log_playwright)
+    return PlaywrightDriverAdapter(settings, log_playwright=log_playwright)
+
+
 class PlaywrightJobScraper(SelectorBasedScraper):
     portal_name = "playwright"
     ready_selectors = ("body",)
@@ -391,7 +527,7 @@ class PlaywrightJobScraper(SelectorBasedScraper):
     def _build_driver(self):
         if self.driver_factory is not None:
             return self.driver_factory()
-        return PlaywrightDriverAdapter(self.settings, log_playwright=self.log_playwright)
+        return build_playwright_driver(self.settings, self.portal_name, log_playwright=self.log_playwright)
 
     def _load_rendered_html(self, driver, requested_url: str, selectors: tuple[str, ...]) -> tuple[str, str, int | None]:
         driver.set_page_load_timeout(
@@ -406,6 +542,13 @@ class PlaywrightJobScraper(SelectorBasedScraper):
                 self._wait_for_rendered_dom(driver, selectors)
                 html = getattr(driver, "page_source", "") or ""
                 final_url = getattr(driver, "current_url", "") or requested_url
+                title = ""
+                get_title = getattr(driver, "get_title", None)
+                if callable(get_title):
+                    title = str(get_title() or "")
+                if title:
+                    self._log_playwright(f"Playwright: page_title={title}")
+                self._log_playwright(f"Playwright: html_length={len(html)}")
                 return html, final_url, 200 if html else None
             except Exception as exc:
                 last_error = exc
@@ -430,22 +573,44 @@ class PlaywrightJobScraper(SelectorBasedScraper):
             1,
             int(getattr(self.settings, "playwright_page_load_timeout", getattr(self.settings, "scraper_timeout", 20)) or 1),
         )
+        stable_wait_seconds = max(0.25, float(getattr(self.settings, "playwright_scroll_pause", 0) or 0.25))
+        wait_for_load_state = getattr(driver, "wait_for_load_state", None)
+        wait_for_timeout = getattr(driver, "wait_for_timeout", None)
+        if callable(wait_for_load_state):
+            wait_for_load_state("domcontentloaded", timeout=timeout)
         wait_supported = getattr(driver, "wait_for_any_selector", None)
         if callable(wait_supported) and wait_supported(selectors, timeout=timeout):
+            if callable(wait_for_timeout):
+                wait_for_timeout(stable_wait_seconds)
+            return
+        if callable(wait_for_load_state):
+            wait_for_load_state("networkidle", timeout=max(1, timeout // 2))
+            if callable(wait_supported) and wait_supported(selectors, timeout=max(1, timeout // 2)):
+                if callable(wait_for_timeout):
+                    wait_for_timeout(stable_wait_seconds)
+                return
+
+        if callable(wait_for_timeout):
+            wait_for_timeout(stable_wait_seconds)
             return
 
-        pause = max(0, int(getattr(self.settings, "playwright_scroll_pause", 0) or 0))
+        pause = max(0.0, float(getattr(self.settings, "playwright_scroll_pause", 0) or 0))
         if pause:
             sleep(pause)
 
     def _scroll_page(self, driver) -> None:
-        pause = max(0, int(getattr(self.settings, "playwright_scroll_pause", 0) or 0))
+        pause = max(0.25, float(getattr(self.settings, "playwright_scroll_pause", 0) or 0.25))
         max_scrolls = max(0, int(getattr(self.settings, "playwright_max_scrolls", 0) or 0))
-        if pause:
+        wait_for_timeout = getattr(driver, "wait_for_timeout", None)
+        if callable(wait_for_timeout):
+            wait_for_timeout(pause)
+        elif pause:
             sleep(pause)
         for _ in range(max_scrolls):
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            if pause:
+            driver.execute_script("window.scrollBy(0, Math.max(500, Math.floor(window.innerHeight * 0.85)));")
+            if callable(wait_for_timeout):
+                wait_for_timeout(pause)
+            elif pause:
                 sleep(pause)
 
     def _log_playwright(self, message: str) -> None:

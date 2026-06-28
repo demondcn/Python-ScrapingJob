@@ -8,8 +8,7 @@ import pytest
 from src.jobops_assistant import cli as cli_module
 from src.jobops_assistant.cli import _handle_playwright_login, _handle_playwright_test
 from src.jobops_assistant.search_sources import SourceTestResult
-from src.jobops_assistant.scrapers.base_scraper import ScrapedJob
-from src.jobops_assistant.scrapers import computrabajo_playwright_scraper as computrabajo_module
+from src.jobops_assistant.scrapers.base_scraper import ScrapedJob, SourceBlockedError
 from src.jobops_assistant.scrapers import playwright_base as playwright_base_module
 from src.jobops_assistant.scrapers.computrabajo_playwright_scraper import ComputrabajoPlaywrightJobScraper
 from src.jobops_assistant.scrapers.indeed_playwright_scraper import IndeedPlaywrightJobScraper
@@ -227,9 +226,9 @@ def test_computrabajo_playwright_loads_page(tmp_path: Path):
 
     assert "Soporte de Aplicaciones Junior" in rendered_html
     assert driver.visited_urls == [source_url]
-    assert driver.load_states == []
-    assert 4.0 in driver.timeout_waits
-    assert driver.scrolls == 0
+    assert [state for state, _ in driver.load_states] == ["domcontentloaded", "domcontentloaded"]
+    assert 2.0 in driver.timeout_waits
+    assert driver.scrolls >= 3
     assert driver.quit_called is True
 
 
@@ -247,6 +246,14 @@ def test_computrabajo_playwright_extract_jobs_from_rendered_html(tmp_path: Path)
               <p class="summary">Python, SQL y APIs.</p>
             </article>
             """,
+            detail_url: """
+            <div class="box_detail">
+              <h1>Backend Junior</h1>
+              <div class="box_company"><h2>Acme Backend</h2></div>
+              <p class="fc_aux">Remoto</p>
+              <div class="mbB">Python, SQL y APIs.</div>
+            </div>
+            """,
         }
     )
     scraper = ComputrabajoPlaywrightJobScraper(_settings(tmp_path), driver_factory=lambda: driver)
@@ -258,7 +265,7 @@ def test_computrabajo_playwright_extract_jobs_from_rendered_html(tmp_path: Path)
     assert jobs[0].company == "Acme Backend"
     assert jobs[0].location == "Remoto"
     assert jobs[0].description == "Python, SQL y APIs."
-    assert jobs[0].url == f"{detail_url}?utm_source=test"
+    assert jobs[0].url == detail_url
     assert jobs[0].portal == "computrabajo_playwright"
 
 
@@ -325,7 +332,7 @@ def test_computrabajo_playwright_logs_debug_when_empty(tmp_path: Path, capsys):
     assert "[computrabajo] final_url=https://computrabajo.example/jobs" in output
     assert "[computrabajo] html_length=" in output
     assert "[computrabajo] job_containers_before_parse=0" in output
-    assert "[computrabajo] blocked=true" in output
+    assert "[computrabajo] blocked=false" in output
     assert "[computrabajo] html_snippet=" in output
 
 
@@ -350,14 +357,14 @@ def test_computrabajo_playwright_does_not_wait_for_networkidle(tmp_path: Path):
     rendered_html = scraper.fetch_search_results(_source("computrabajo_playwright", source_url))
 
     assert "Soporte de Aplicaciones Junior" in rendered_html
-    assert driver.load_states == []
+    assert [state for state, _ in driver.load_states] == ["domcontentloaded", "domcontentloaded"]
 
 
 def test_computrabajo_playwright_bypasses_adapter_with_raw_driver(tmp_path: Path, monkeypatch, capsys):
     events: list[str] = []
 
     class _SentinelRawDriver(_FakeDriver):
-        def __init__(self, timeout_seconds: int) -> None:
+        def __init__(self, settings, *, log_playwright: bool = True) -> None:
             super().__init__(
                 """
                 <article>
@@ -367,13 +374,13 @@ def test_computrabajo_playwright_bypasses_adapter_with_raw_driver(tmp_path: Path
                 """,
                 current_url="https://computrabajo.example/jobs",
             )
-            events.append(f"raw:{timeout_seconds}")
+            events.append(f"raw:{settings.playwright_page_load_timeout}:{log_playwright}")
             self.last_status_code = 200
 
     def _unexpected_adapter(*args, **kwargs):
         raise AssertionError("PlaywrightDriverAdapter no debe usarse en Computrabajo")
 
-    monkeypatch.setattr(computrabajo_module, "_RawComputrabajoPlaywrightDriver", _SentinelRawDriver)
+    monkeypatch.setattr(playwright_base_module, "RawPlaywrightDriver", _SentinelRawDriver)
     monkeypatch.setattr(playwright_base_module, "PlaywrightDriverAdapter", _unexpected_adapter)
 
     scraper = ComputrabajoPlaywrightJobScraper(_settings(tmp_path))
@@ -382,10 +389,9 @@ def test_computrabajo_playwright_bypasses_adapter_with_raw_driver(tmp_path: Path
 
     output = capsys.readouterr().out
     assert "Soporte de Aplicaciones Junior" in html
-    assert events == ["raw:1"]
-    assert "[computrabajo] using_raw_playwright=true" in output
-    assert "[computrabajo] adapter_bypassed=true" in output
-    assert "[computrabajo] isolated_mode_active=true" in output
+    assert events == ["raw:1:True"]
+    assert "[driver] computrabajo_adapter_bypassed=true" in output
+    assert "[driver] using_raw_playwright_only=true" in output
 
 
 def test_linkedin_playwright_extracts_public_cards(tmp_path: Path):
@@ -547,12 +553,11 @@ def test_computrabajo_playwright_blocked_page_returns_empty(tmp_path: Path):
     )
     scraper = ComputrabajoPlaywrightJobScraper(_settings(tmp_path), driver_factory=lambda: driver)
 
-    jobs = scraper.scrape(_source("computrabajo_playwright", source_url))
-
-    assert jobs == []
+    with pytest.raises(SourceBlockedError):
+        scraper.scrape(_source("computrabajo_playwright", source_url))
     snapshot = scraper.get_last_debug_snapshot()
     assert snapshot is not None
-    assert snapshot.block_reason == "computrabajo_403"
+    assert snapshot.block_reason == "access denied"
 
 
 def test_playwright_cli_login_subcommand_is_registered():
