@@ -24,6 +24,7 @@ class SeleniumJobScraper(SelectorBasedScraper):
     """Selector-based scraper that gets HTML through Selenium for public pages."""
 
     portal_name = "selenium"
+    engine_name = "selenium"
 
     def __init__(self, settings, driver_factory=None, *, log_selenium: bool = True) -> None:
         super().__init__(settings)

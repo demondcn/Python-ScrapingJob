@@ -895,10 +895,36 @@ def _handle_sources_disable_blocked(args, session: Session, settings, session_fa
 
 
 def _handle_selenium_test(args, session: Session, settings, session_factory) -> int:
-    print("Selenium CLI deprecated legacy engine. Redirecting to Playwright.")
-    delegated_args = argparse.Namespace(**vars(args))
-    delegated_args.portal = _normalize_playwright_portal(args.portal)
-    return _handle_playwright_test(delegated_args, session, settings, session_factory)
+    portal = _normalize_selenium_portal(args.portal)
+    try:
+        search_url = _resolve_selenium_test_url(args, portal)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+    source = JobSearchSource(
+        portal=portal,
+        target_role=args.target_role,
+        search_url=search_url,
+        keywords=(getattr(args, "keyword", None) or "").strip(),
+        location=(getattr(args, "location", None) or "").strip(),
+        enabled=True,
+        interval_minutes=max(30, settings.min_monitor_interval_minutes),
+    )
+    result, _scraper = _run_source_test_with_scraper(settings, source)
+    print(f"Portal: {portal}")
+    print(f"URL: {source.search_url}")
+    if result.error:
+        print(f"Error: {result.error}")
+        return 1
+    print(f"Ofertas detectadas: {len(result.offers)}")
+    for item in result.offers[:10]:
+        print(f"- {item.title} | {item.company} | {item.location} | {item.url}")
+    if result.discarded:
+        print(f"Ofertas descartadas por relevancia: {len(result.discarded)}")
+        for discarded in result.discarded[:5]:
+            reason_text = "; ".join(discarded.reasons) if discarded.reasons else "sin razon registrada"
+            print(f"- Descartada: {discarded.job.title} | razon: {reason_text} | {discarded.job.url}")
+    return 0
 
 
 def _handle_playwright_test(args, session: Session, settings, session_factory) -> int:
@@ -973,7 +999,10 @@ def _handle_playwright_login(args, session: Session, settings, session_factory) 
 
 
 def _normalize_selenium_portal(portal: str) -> str:
-    return _normalize_playwright_portal(portal)
+    normalized = portal.strip().lower()
+    if normalized in {"indeed", "linkedin", "computrabajo"}:
+        return f"{normalized}_selenium"
+    return normalized
 
 
 def _normalize_playwright_portal(portal: str) -> str:
@@ -984,7 +1013,23 @@ def _normalize_playwright_portal(portal: str) -> str:
 
 
 def _resolve_selenium_test_url(args, portal: str) -> str:
-    return _resolve_playwright_test_url(args, _normalize_playwright_portal(portal))
+    explicit_url = (getattr(args, "url", None) or "").strip()
+    if explicit_url:
+        return normalize_linkedin_source_url(
+            portal,
+            explicit_url,
+            keywords=getattr(args, "keyword", "") or "",
+            location=getattr(args, "location", "") or "",
+        )
+    if portal != "linkedin_selenium":
+        raise ValueError("Debes indicar --url para este portal.")
+    return build_linkedin_jobs_url(
+        getattr(args, "keyword", "") or "",
+        getattr(args, "location", "") or "",
+        date_posted=getattr(args, "date_posted", "24h") or "24h",
+        experience_levels=getattr(args, "experience_levels", None),
+        workplace_types=getattr(args, "workplace_types", None),
+    )
 
 
 def _resolve_playwright_test_url(args, portal: str) -> str:

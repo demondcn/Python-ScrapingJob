@@ -10,10 +10,12 @@ from src.jobops_assistant.cli import _handle_playwright_login, _handle_playwrigh
 from src.jobops_assistant.search_sources import SourceTestResult
 from src.jobops_assistant.scrapers.base_scraper import ScrapedJob, SourceBlockedError
 from src.jobops_assistant.scrapers import playwright_base as playwright_base_module
+from src.jobops_assistant.scrapers import registry as registry_module
 from src.jobops_assistant.scrapers.computrabajo_playwright_scraper import ComputrabajoPlaywrightJobScraper
 from src.jobops_assistant.scrapers.indeed_playwright_scraper import IndeedPlaywrightJobScraper
 from src.jobops_assistant.scrapers.indeed_playwright_scraper import INDEED_PLAYWRIGHT_LOGIN_URL
 from src.jobops_assistant.scrapers.linkedin_playwright_scraper import LinkedInPlaywrightJobScraper
+from src.jobops_assistant.scrapers.linkedin_selenium_scraper import LinkedInSeleniumJobScraper
 from src.jobops_assistant.scrapers.registry import (
     DisabledPortalScraper,
     get_portal_reference_urls,
@@ -742,16 +744,24 @@ def test_playwright_registry_keeps_computrabajo_visible_but_disabled_by_default(
     assert "linkedin_playwright" in portals
     assert "computrabajo_playwright" in portals
     assert "indeed_playwright" in portals
-    assert "linkedin_selenium" not in portals
-    assert "indeed_selenium" not in portals
+    assert "linkedin_selenium" in portals
+    assert "indeed_selenium" in portals
     assert "computrabajo" not in enabled_portals
     assert "computrabajo_playwright" not in enabled_portals
     assert isinstance(get_scraper("linkedin_playwright", _settings(tmp_path)), LinkedInPlaywrightJobScraper)
+    assert isinstance(get_scraper("linkedin_selenium", _settings(tmp_path)), LinkedInSeleniumJobScraper)
     assert isinstance(get_scraper("indeed_playwright", _settings(tmp_path)), IndeedPlaywrightJobScraper)
     assert isinstance(get_scraper("computrabajo", _settings(tmp_path)), DisabledPortalScraper)
     assert source_uses_persistent_auth("linkedin_playwright") is True
     assert is_portal_enabled_by_default("ricardo_jobs") is False
     assert get_portal_reference_urls("sena") == SENA_DEFAULT_SOURCE_URLS
+
+
+def test_registry_raises_routing_mismatch_when_playwright_portal_points_to_selenium(tmp_path: Path, monkeypatch):
+    monkeypatch.setitem(registry_module.SCRAPER_REGISTRY, "linkedin_playwright", LinkedInSeleniumJobScraper)
+
+    with pytest.raises(RuntimeError, match="SCRAPER_ROUTING_MISMATCH"):
+        get_scraper("linkedin_playwright", _settings(tmp_path))
 
 
 def test_disabled_computrabajo_scraper_returns_empty_snapshot(tmp_path: Path):

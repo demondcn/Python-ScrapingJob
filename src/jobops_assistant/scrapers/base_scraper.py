@@ -81,6 +81,7 @@ class CaptchaRequiredError(ScraperError):
 
 class BaseJobScraper:
     portal_name = "base"
+    engine_name = "http"
     login_error_message = "La fuente requiere inicio de sesion. Se omite esta fuente."
     blocked_error_message = "La fuente bloqueo el acceso publico. Se omite esta fuente."
     captcha_error_message = "La fuente solicito captcha. Se omite esta fuente."

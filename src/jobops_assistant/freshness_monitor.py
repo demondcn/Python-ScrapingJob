@@ -109,7 +109,9 @@ def run_fresh_monitor(
         checked_at = datetime.now(UTC)
         try:
             scraper = get_scraper(source.portal, settings)
-            runtime_portal = getattr(scraper, "portal_name", runtime_portal)
+            logs.append(f"[router] portal={runtime_portal}")
+            logs.append(f"[router] selected_scraper={scraper.__class__.__name__}")
+            logs.append(f"[router] engine={getattr(scraper, 'engine_name', 'unknown')}")
             jobs = scraper.scrape(source)
             stats = SourceRunStats(portal=runtime_portal, source_id=source.id, found=len(jobs))
             logs.append(f"Portal: {runtime_portal}")
@@ -207,6 +209,13 @@ def run_fresh_monitor(
                 f"duplicados={stats.duplicates} descartadas={stats.discarded} pending_alerts={stats.pending_alerts} "
                 f"queued_alerts={stats.queued_alerts}"
             )
+            logs.append(f"[pipeline] found_jobs={stats.found} portal={runtime_portal}")
+            logs.append(f"[pipeline] discarded_jobs={stats.discarded} portal={runtime_portal}")
+            logs.append(f"[pipeline] duplicate_jobs={stats.duplicates} portal={runtime_portal}")
+            logs.append(
+                f"[pipeline] scoring_results portal={runtime_portal} "
+                f"queued_alerts={stats.queued_alerts} pending_alerts={stats.pending_alerts}"
+            )
             if notify_after_each_source:
                 immediate_logs, outcome = _send_immediate_digest_for_source(
                     session,
@@ -228,6 +237,8 @@ def run_fresh_monitor(
                 )
         except Exception as exc:
             update_source_check(session, source, checked_at=checked_at, error=str(exc))
+            if "SCRAPER_ROUTING_MISMATCH" in str(exc):
+                logs.append("[router_error] mismatch_detected=true")
             logs.append(f"[{runtime_portal}] Error: {exc}")
 
     if notify_after_each_source:

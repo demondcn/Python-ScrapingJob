@@ -468,6 +468,7 @@ def build_playwright_driver(settings, portal_name: str, *, log_playwright: bool 
 
 class PlaywrightJobScraper(SelectorBasedScraper):
     portal_name = "playwright"
+    engine_name = "playwright"
     ready_selectors = ("body",)
 
     def __init__(self, settings, driver_factory=None, *, log_playwright: bool = True) -> None:
