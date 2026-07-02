@@ -1,0 +1,30 @@
+requested_url: https://co.indeed.com/jobs?q=junior%20backend&l=Bogotá%2C%20Cundinamarca&fromage=1&radius=25&from=searchOnDesktopSerp
+status_code: unknown
+final_url: https://co.indeed.com/jobs?q=junior%20backend&l=Bogotá%2C%20Cundinamarca&fromage=1&radius=25&from=searchOnDesktopSerp
+content_type: unknown
+html_size: 0
+block_reason: Message: invalid session id: session deleted as the browser has closed the connection
+from disconnected: not connected to DevTools
+  (Session info: chrome=149.0.7827.201); For documentation on this error, please visit: https://www.selenium.dev/documentation/webdriver/troubleshooting/errors#invalidsessionidexception
+Stacktrace:
+	chromedriver!GetHandleVerifier [0x7ff6d0553fa5+14925]
+	chromedriver!GetHandleVerifier [0x7ff6d0554000+14980]
+	chromedriver!(No symbol) [0x7ff6d009793d]
+	chromedriver!(No symbol) [0x7ff6d0082d82]
+	chromedriver!(No symbol) [0x7ff6d00a90cc]
+	chromedriver!(No symbol) [0x7ff6d0121aa0]
+	chromedriver!(No symbol) [0x7ff6d013ec82]
+	chromedriver!(No symbol) [0x7ff6d00e401c]
+	chromedriver!(No symbol) [0x7ff6d00e4f43]
+	chromedriver!GetHandleVerifier [0x7ff6d0b37591+5f7f11]
+	chromedriver!GetHandleVerifier [0x7ff6d0b31902+5f2282]
+	chromedriver!GetHandleVerifier [0x7ff6d0b57115+617a95]
+	chromedriver!GetHandleVerifier [0x7ff6d0571dce+3274e]
+	chromedriver!GetHandleVerifier [0x7ff6d057a82c+3b1ac]
+	chromedriver!GetHandleVerifier [0x7ff6d055d744+1e0c4]
+	chromedriver!GetHandleVerifier [0x7ff6d055d8d4+1e254]
+	chromedriver!GetHandleVerifier [0x7ff6d0541447+1dc7]
+	KERNEL32!BaseThreadInitThunk [0x7fface17259d+1d]
+	ntdll!RtlUserThreadStart [0x7fface80af78+28]
+
+html_preview:
