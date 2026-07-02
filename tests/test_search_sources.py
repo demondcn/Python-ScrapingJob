@@ -6,6 +6,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from src.jobops_assistant.cli import (
+    _handle_sources_add,
     _handle_sources_test,
     _handle_sources_disable_blocked,
     _handle_sources_unpause,
@@ -29,6 +30,7 @@ from src.jobops_assistant.search_sources import (
 )
 from src.jobops_assistant.settings import Settings
 from src.jobops_assistant.scrapers.base_scraper import ResponseDebugSnapshot, ScrapedJob
+from src.jobops_assistant.scrapers.registry import portal_supports_flexible_targets
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -100,6 +102,139 @@ def test_add_source_normalizes_linkedin_search_url(tmp_path: Path):
             "https://www.linkedin.com/jobs/search/?keywords=Backend%20Junior"
             "&location=Colombia&f_AL=true&sortBy=DD"
         )
+
+
+def test_registry_marks_sena_as_flexible_target_portal():
+    assert portal_supports_flexible_targets("sena") is True
+    assert portal_supports_flexible_targets("linkedin_playwright") is False
+
+
+def test_add_source_dedupes_existing_sena_url_and_logs(tmp_path: Path, caplog):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+
+    with Session(engine) as session:
+        original = add_source(
+            session,
+            portal="sena",
+            target_role="ingeniero_software",
+            search_url="https://agenciapublicadeempleo.sena.edu.co/spe-web/spe/public/buscadorVacante?solicitudId=Ingeniero%20de%20software",
+            interval_minutes=15,
+            min_interval_minutes=settings.min_monitor_interval_minutes,
+        )
+
+        with caplog.at_level("INFO"):
+            duplicate = add_source(
+                session,
+                portal="sena",
+                target_role="otro_target_libre",
+                search_url="https://agenciapublicadeempleo.sena.edu.co/spe-web/spe/public/buscadorVacante?solicitudId=Ingeniero%20de%20software",
+                interval_minutes=15,
+                min_interval_minutes=settings.min_monitor_interval_minutes,
+            )
+
+        assert duplicate.id == original.id
+        assert getattr(duplicate, "_jobops_duplicate_skipped", False) is True
+        assert len(list_sources(session)) == 1
+        assert "[dedup] sena_duplicate_source_skipped=true" in caplog.text
+        assert "[dedup] url=https://agenciapublicadeempleo.sena.edu.co/spe-web/spe/public/buscadorVacante?solicitudId=Ingeniero%20de%20software" in caplog.text
+
+
+def test_handle_sources_add_allows_free_target_for_sena(tmp_path: Path, capsys):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+    session_factory = create_session_factory(engine)
+
+    with Session(session_factory.kw["bind"]) as session:
+        code = _handle_sources_add(
+            Namespace(
+                portal="sena",
+                target_role="ingeniero_software",
+                url="https://agenciapublicadeempleo.sena.edu.co/spe-web/spe/public/buscadorVacante?solicitudId=Ingeniero%20de%20software",
+                interval=15,
+                keywords="",
+                location="",
+            ),
+            session,
+            settings,
+            session_factory,
+        )
+
+        output = capsys.readouterr().out
+        sources = list_sources(session)
+        assert code == 0
+        assert "Target no soportado" not in output
+        assert len(sources) == 1
+        assert sources[0].portal == "sena"
+        assert sources[0].target_role == "ingeniero_software"
+
+
+def test_handle_sources_add_keeps_strict_target_validation_for_other_portals(tmp_path: Path, capsys):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+    session_factory = create_session_factory(engine)
+
+    with Session(session_factory.kw["bind"]) as session:
+        code = _handle_sources_add(
+            Namespace(
+                portal="elempleo",
+                target_role="ingeniero_software",
+                url="https://www.elempleo.com/co/ofertas-empleo/trabajo-junior-backend",
+                interval=15,
+                keywords="",
+                location="",
+            ),
+            session,
+            settings,
+            session_factory,
+        )
+
+        output = capsys.readouterr().out
+        assert code == 1
+        assert "Target no soportado: ingeniero_software" in output
+        assert list_sources(session) == []
+
+
+def test_handle_sources_add_returns_existing_sena_source_when_url_is_duplicated(tmp_path: Path, capsys):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+    session_factory = create_session_factory(engine)
+    source_url = "https://agenciapublicadeempleo.sena.edu.co/spe-web/spe/public/buscadorVacante?solicitudId=Programador%20de%20software"
+
+    with Session(session_factory.kw["bind"]) as session:
+        existing = add_source(
+            session,
+            portal="sena",
+            target_role="programador_software",
+            search_url=source_url,
+            interval_minutes=15,
+            min_interval_minutes=settings.min_monitor_interval_minutes,
+        )
+
+        code = _handle_sources_add(
+            Namespace(
+                portal="sena",
+                target_role="otro_target",
+                url=source_url,
+                interval=15,
+                keywords="",
+                location="",
+            ),
+            session,
+            settings,
+            session_factory,
+        )
+
+        output = capsys.readouterr().out
+        sources = list_sources(session)
+        assert code == 0
+        assert f"Fuente ya existente: sena -> {source_url}" in output
+        assert len(sources) == 1
+        assert sources[0].id == existing.id
 
 
 def test_init_db_normalizes_existing_linkedin_source_urls(tmp_path: Path):

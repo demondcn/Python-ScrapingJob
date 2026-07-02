@@ -289,6 +289,157 @@ class _MappedDriver(_FakeDriver):
         self.current_url = url
 
 
+def test_sena_scraper_fetches_multiple_search_urls(tmp_path: Path):
+    url_1 = "https://agenciapublicadeempleo.sena.edu.co/spe-web/spe/public/buscadorVacante?solicitudId=Ingeniero%20de%20software"
+    url_2 = "https://agenciapublicadeempleo.sena.edu.co/spe-web/spe/public/buscadorVacante?solicitudId=Programador%20de%20software"
+    session = _MappedSession(
+        {
+            url_1: _FakeResponse(
+                200,
+                """
+                <article class="vacante">
+                  <h2><a href="/detalle/101">Ingeniero de Software Junior</a></h2>
+                  <div class="company">SENA Uno</div>
+                  <div class="location">Bogota</div>
+                </article>
+                """,
+                url=url_1,
+            ),
+            url_2: _FakeResponse(
+                200,
+                """
+                <article class="vacante">
+                  <h2><a href="/detalle/202">Programador de Software</a></h2>
+                  <div class="company">SENA Dos</div>
+                  <div class="location">Medellin</div>
+                </article>
+                """,
+                url=url_2,
+            ),
+        }
+    )
+    scraper = SenaJobScraper(_settings(tmp_path), session=session)
+    source = _source("sena")
+    source.search_url = f"{url_1}\n{url_2}"
+
+    jobs = scraper.scrape(source)
+
+    assert len(jobs) == 2
+    assert {job.title for job in jobs} == {"Ingeniero de Software Junior", "Programador de Software"}
+    assert {job.url for job in jobs} == {
+        "https://agenciapublicadeempleo.sena.edu.co/detalle/101",
+        "https://agenciapublicadeempleo.sena.edu.co/detalle/202",
+    }
+    assert session.calls == [(url_1, 5), (url_2, 5)]
+
+
+def test_sena_scraper_uses_fallback_cards_when_dom_changes(tmp_path: Path):
+    html = """
+    <section class="results">
+      <div class="vacante card">
+        <h3><a href="/detalle/303">Tecnologo ADSO</a></h3>
+        <span class="empresa">SENA Innova</span>
+        <span class="ubicacion">Cali</span>
+        <p class="description">Analisis, desarrollo y soporte.</p>
+      </div>
+      <table>
+        <tbody>
+          <tr class="result-item">
+            <td><a href="/detalle/404">Disenador de Soluciones de Software</a></td>
+            <td class="empresa">SENA Lab</td>
+            <td class="ubicacion">Remoto</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+    """
+    scraper = SenaJobScraper(_settings(tmp_path))
+
+    jobs = scraper.parse_search_results(html, _source("sena"))
+
+    assert len(jobs) == 2
+    by_title = {job.title: job for job in jobs}
+    assert by_title["Tecnologo ADSO"].company == "SENA Innova"
+    assert by_title["Tecnologo ADSO"].location == "Cali"
+    assert by_title["Disenador de Soluciones de Software"].company == "SENA Lab"
+    assert by_title["Disenador de Soluciones de Software"].location == "Remoto"
+
+
+def test_sena_scraper_extracts_jobs_from_table_text_blocks(tmp_path: Path, caplog):
+    html = """
+    <table id="buscar-solicitud-public">
+      <tbody>
+        <tr>
+          <td>
+            <div class="tdbuscador">
+              <div class="container-fluid">
+                <div class="row">
+                  <div class="span2"><h4>4149888</h4></div>
+                  <div class="span5">
+                    <h5 class="titulo-color">Ingeniero de software</h5>
+                    <h6>Salario no definido</h6>
+                    <p>32 meses de experiencia</p>
+                    <p>Tipo de contrato: Por obra</p>
+                    <p>Bogota, Bogota D.C.</p>
+                  </div>
+                  <div class="span1">
+                    <a class="btn btn-primary" href="/spe-web/spe/demanda/solicitud-sintesis/4149888;jsessionid=ABC123">Postularme</a>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    """
+    scraper = SenaJobScraper(_settings(tmp_path))
+
+    with caplog.at_level("INFO"):
+        jobs = scraper.parse_search_results(html, _source("sena"))
+
+    assert len(jobs) == 1
+    assert jobs[0].title == "Ingeniero de software"
+    assert jobs[0].description.startswith("4149888 Ingeniero de software")
+    assert jobs[0].url == "https://sena.example/spe-web/spe/demanda/solicitud-sintesis/4149888"
+    assert "[sena] parser_mode=text_fallback" in caplog.text
+    assert "[sena] raw_blocks_found=" in caplog.text
+    assert "[sena] jobs_detected=1" in caplog.text
+
+
+def test_sena_scraper_text_fallback_deduplicates_same_title(tmp_path: Path):
+    html = """
+    <table id="buscar-solicitud-public">
+      <tbody>
+        <tr>
+          <td>
+            <div class="tdbuscador">
+              <h5>Programador de software</h5>
+              <p>Remoto</p>
+              <a href="/spe-web/spe/demanda/solicitud-sintesis/111">Postularme</a>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td>
+            <div class="tdbuscador">
+              <h5>Programador de software</h5>
+              <p>Bogota</p>
+              <a href="/spe-web/spe/demanda/solicitud-sintesis/222">Postularme</a>
+            </div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    """
+    scraper = SenaJobScraper(_settings(tmp_path))
+
+    jobs = scraper.parse_search_results(html, _source("sena"))
+
+    assert len(jobs) == 1
+    assert jobs[0].title == "Programador de software"
+
+
 def test_scraper_handles_public_block_without_crashing(tmp_path: Path):
     driver = _FakeDriver(
         "<html><body><main><h1>Access denied</h1><p>No autorizado</p></main></body></html>",

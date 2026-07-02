@@ -375,6 +375,47 @@ def test_send_job_alert_digest_routes_soporte_ti_to_matching_chat(monkeypatch, t
     assert "Tipo: Soporte TI / Hardware" in sent[0][1]
 
 
+def test_send_job_alert_digest_routes_sena_flexible_target_to_backend_chat(monkeypatch, tmp_path, caplog):
+    sent: list[tuple[str, str]] = []
+    settings = _telegram_settings(
+        tmp_path,
+        telegram_chat_ids=["8732193921", "7800792706"],
+        telegram_chat_targets={
+            "8732193921": {"backend_junior", "frontend_junior", "fullstack_junior", "devops_trainee"},
+            "7800792706": {"soporte_ti_junior", "hardware_support_junior"},
+        },
+    )
+    offer = JobOffer(
+        id=230,
+        title="Ingeniero de software",
+        company="SENA",
+        portal="sena",
+        location="Bogota",
+        modality="Presencial",
+        salary="Salario no definido",
+        url="https://agenciapublicadeempleo.sena.edu.co/spe-web/spe/demanda/solicitud-sintesis/4149888",
+        description="Ingeniero de software. Desarrollo de software, APIs y analisis.",
+        compatibility_score=90,
+    )
+    setattr(offer, "_jobops_target_role", "ingeniero_software")
+
+    caplog.set_level(logging.INFO, logger="src.jobops_assistant.telegram_notifier")
+    monkeypatch.setattr(
+        "src.jobops_assistant.telegram_notifier._post_telegram_message_to_chat",
+        lambda settings, message, chat_id: sent.append((chat_id, message)),
+    )
+
+    sent_ok, _message, delivered = send_job_alert_digest([offer], settings)
+
+    assert sent_ok is True
+    assert delivered == [offer]
+    assert [chat_id for chat_id, _ in sent] == ["8732193921"]
+    assert "Target: backend_junior" in sent[0][1]
+    assert "[telegram] preparing_message" in caplog.text
+    assert "[telegram] including_sena_jobs=1" in caplog.text
+    assert "[telegram] sena_sent=true" in caplog.text
+
+
 def test_send_job_alert_digest_does_not_route_backend_to_soporte_chat(monkeypatch, tmp_path):
     sent_chat_ids: list[str] = []
     settings = _telegram_settings(

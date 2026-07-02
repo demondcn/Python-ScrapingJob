@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import logging
 import re
 from datetime import UTC, datetime
+import unicodedata
 
 import requests
 
@@ -18,6 +19,26 @@ TARGET_TYPE_LABELS = {
     "soporte_ti_junior": "Soporte TI / Hardware",
     "hardware_support_junior": "Soporte TI / Hardware",
 }
+KNOWN_TARGET_ROLE_NAMES = {
+    "devops_trainee",
+    "soporte_aplicaciones",
+    "soporte_ti_junior",
+    "hardware_support_junior",
+    "infraestructura_junior",
+    "cloud_support",
+    "qa_junior",
+    "backend_junior",
+    "frontend_junior",
+    "fullstack_junior",
+}
+FLEX_TARGET_FALLBACKS = (
+    ("backend_junior", ("ingeniero_software", "ingeniero de software", "programador", "desarrollo de software", "desarrollador", "software engineer", "adso", "analisis y desarrollo de software")),
+    ("frontend_junior", ("frontend", "front end", "disenador ui", "disenador ux", "maquetador")),
+    ("soporte_aplicaciones", ("soporte", "mesa de ayuda", "help desk", "service desk", "aplicaciones")),
+    ("infraestructura_junior", ("infraestructura", "redes", "telecomunicaciones", "soporte tecnico")),
+    ("qa_junior", ("qa", "testing", "pruebas")),
+    ("devops_trainee", ("devops", "cloud", "docker", "linux", "ci/cd")),
+)
 
 
 @dataclass(slots=True)
@@ -131,15 +152,21 @@ def send_job_alert_digest(
         return False, "No hay ofertas para enviar en el digest.", []
     if not settings.telegram_bot_token or not _get_all_telegram_chat_ids(settings):
         return False, "Credenciales de Telegram incompletas; no se envio notificacion.", []
+    logger.info("[telegram] preparing_message")
+    sena_jobs_count = sum(1 for job in jobs if (job.portal or "").casefold() == "sena")
+    logger.info("[telegram] including_sena_jobs=%s", sena_jobs_count)
 
     limited_jobs, additional_count = _limit_digest_jobs(jobs, settings.telegram_digest_max_jobs)
     if _has_telegram_chat_targets(settings):
-        return _send_targeted_job_alert_digest(
+        sent, message, delivered_jobs = _send_targeted_job_alert_digest(
             limited_jobs,
             settings,
             title=title,
             additional_count=additional_count,
         )
+        if any((job.portal or "").casefold() == "sena" for job in delivered_jobs):
+            logger.info("[telegram] sena_sent=true")
+        return sent, message, delivered_jobs
 
     digest_parts = _build_digest_parts(
         limited_jobs,
@@ -159,6 +186,8 @@ def send_job_alert_digest(
     message = f"digest enviado con {len(delivered_jobs)} ofertas"
     if message_count > 1:
         message = f"{message} en {message_count} mensajes"
+    if any((job.portal or "").casefold() == "sena" for job in delivered_jobs):
+        logger.info("[telegram] sena_sent=true")
     return True, message, delivered_jobs
 
 
@@ -499,9 +528,10 @@ def _build_delivery_lines_from_labels(
 
 def _get_offer_target_role(offer: JobOffer) -> str:
     target_role = getattr(offer, "_jobops_target_role", "")
-    if target_role:
-        return _normalize_target_role_name(str(target_role))
-    return _normalize_target_role_name(infer_target_role(offer))
+    resolved_from_source = _resolve_target_role_name(str(target_role))
+    if resolved_from_source:
+        return resolved_from_source
+    return _resolve_target_role_name(infer_target_role(offer)) or _normalize_target_role_name(infer_target_role(offer))
 
 
 def _offer_delivery_key(offer: JobOffer) -> int:
@@ -676,3 +706,20 @@ def _normalize(value: str) -> str:
 
 def _normalize_target_role_name(value: str | None) -> str:
     return re.sub(r"\s+", "_", (value or "").strip().casefold())
+
+
+def _resolve_target_role_name(value: str | None) -> str:
+    normalized = _normalize_target_role_name(value)
+    if normalized in KNOWN_TARGET_ROLE_NAMES:
+        return normalized
+    raw_text = _normalize_match_text(str(value or ""))
+    for target_role, keywords in FLEX_TARGET_FALLBACKS:
+        if any(keyword in raw_text for keyword in keywords):
+            return target_role
+    return ""
+
+
+def _normalize_match_text(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", value or "")
+    without_marks = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return _normalize(without_marks)

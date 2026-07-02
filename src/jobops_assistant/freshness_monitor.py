@@ -360,14 +360,21 @@ def _send_digest_for_cycle(
     settings: Settings,
     digest_queue: dict[int, tuple[JobOffer, str | None]],
 ) -> list[str]:
+    preparation_logs = _build_telegram_preparation_logs(digest_queue, settings)
     outcome = _send_digest_queue(session, settings, digest_queue)
     if not outcome.attempted_offer_ids:
-        return []
+        return preparation_logs
+    logs = list(preparation_logs)
+    if _digest_contains_sena_delivery(digest_queue, outcome.delivered_offer_ids):
+        logs.append("[telegram] sena_sent=true")
     if outcome.sent:
         if outcome.message.casefold().startswith("digest enviado con "):
-            return [f"[telegram] {outcome.message[:1].lower()}{outcome.message[1:]}"]
-        return [f"[telegram] digest enviado con {len(outcome.delivered_offer_ids)} ofertas"]
-    return [f"[telegram] {outcome.message}"]
+            logs.append(f"[telegram] {outcome.message[:1].lower()}{outcome.message[1:]}")
+            return logs
+        logs.append(f"[telegram] digest enviado con {len(outcome.delivered_offer_ids)} ofertas")
+        return logs
+    logs.append(f"[telegram] {outcome.message}")
+    return logs
 
 
 def _send_immediate_digest_for_source(
@@ -542,6 +549,58 @@ def _append_monitor_note(current: str, note: str) -> str:
 
 def _normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip().casefold()
+
+
+def _build_telegram_preparation_logs(
+    digest_queue: dict[int, tuple[JobOffer, str | None]],
+    settings: Settings,
+) -> list[str]:
+    queue_items = _get_notifiable_queue_items(digest_queue, settings)
+    if not queue_items:
+        return []
+    sena_count = sum(1 for offer, _ in queue_items if (offer.portal or "").casefold() == "sena")
+    return [
+        "[telegram] preparing_message",
+        f"[telegram] including_sena_jobs={sena_count}",
+    ]
+
+
+def _digest_contains_sena_delivery(
+    digest_queue: dict[int, tuple[JobOffer, str | None]],
+    delivered_offer_ids: set[int],
+) -> bool:
+    if not delivered_offer_ids:
+        return False
+    for offer_id, (offer, _target_role) in digest_queue.items():
+        if offer_id in delivered_offer_ids and (offer.portal or "").casefold() == "sena":
+            return True
+    return False
+
+
+def _send_immediate_digest_for_source(
+    session: Session,
+    settings: Settings,
+    digest_queue: dict[int, tuple[JobOffer, str | None]],
+    *,
+    source_id: int,
+) -> tuple[list[str], DigestSendOutcome]:
+    preparation_logs = _build_telegram_preparation_logs(digest_queue, settings)
+    outcome = _send_digest_queue(session, settings, digest_queue)
+    if not outcome.attempted_offer_ids:
+        return [*preparation_logs, f"[telegram] sin ofertas nuevas para fuente {source_id}"], outcome
+    logs = list(preparation_logs)
+    if _digest_contains_sena_delivery(digest_queue, outcome.delivered_offer_ids):
+        logs.append("[telegram] sena_sent=true")
+    if outcome.sent:
+        logs.append(f"[telegram] env\u00edo inmediato con {len(outcome.delivered_offer_ids)} ofertas desde fuente {source_id}")
+        return logs, outcome
+    logs.append(f"[telegram] fallo envio inmediato para fuente {source_id}: {outcome.message}")
+    return logs, outcome
+    if outcome.sent:
+        logs.append(f"[telegram] envÃ­o inmediato con {len(outcome.delivered_offer_ids)} ofertas desde fuente {source_id}")
+        return logs, outcome
+    logs.append(f"[telegram] fallo envio inmediato para fuente {source_id}: {outcome.message}")
+    return logs, outcome
 
 
 def _build_paused_source_log(source: JobSearchSource) -> str:

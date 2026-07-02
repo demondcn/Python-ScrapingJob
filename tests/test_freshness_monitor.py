@@ -191,6 +191,69 @@ def test_monitor_saves_new_offers_dedupes_and_notifies_once(tmp_path: Path, monk
         assert any("digest enviado con 1 ofertas" in line for line in first_logs)
 
 
+def test_monitor_keeps_sena_jobs_in_telegram_pipeline(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path)
+    engine = create_sqlite_engine(settings.db_path)
+    init_db(engine)
+    session_factory = create_session_factory(engine)
+    calls: list[list[int]] = []
+
+    with Session(session_factory.kw["bind"]) as session:
+        source = add_source(
+            session,
+            portal="sena",
+            target_role="ingeniero_software",
+            search_url="https://agenciapublicadeempleo.sena.edu.co/spe-web/spe/public/buscadorVacante?solicitudId=Ingeniero%20de%20software",
+            interval_minutes=15,
+            min_interval_minutes=settings.min_monitor_interval_minutes,
+        )
+        job = ScrapedJob(
+            title="Ingeniero de software",
+            company="SENA",
+            portal="sena",
+            location="Bogota",
+            modality="Presencial",
+            salary="Salario no definido",
+            url="https://agenciapublicadeempleo.sena.edu.co/spe-web/spe/demanda/solicitud-sintesis/4149888",
+            description="Ingeniero de software con backend, APIs, SQL y desarrollo de software.",
+            requirements="Tecnologo o ingeniero",
+            published_at=datetime.now(UTC),
+            found_at=datetime.now(UTC),
+            raw_posted_text="Publicado 23/06/2026",
+            source_id=source.id,
+        )
+
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.get_scraper",
+            lambda portal, settings: _FakeScraper([job]),
+        )
+
+        def _fake_refresh_offer_match(session, offer, profile):
+            offer.compatibility_score = 90
+            offer.match_reason = "Coincide con backend_junior: ingeniero de software"
+            session.commit()
+            session.refresh(offer)
+            return offer
+
+        monkeypatch.setattr("src.jobops_assistant.freshness_monitor.refresh_offer_match", _fake_refresh_offer_match)
+        monkeypatch.setattr(
+            "src.jobops_assistant.freshness_monitor.send_job_alert_digest",
+            lambda offers, settings, title=None: calls.append([offer.id for offer in offers]) or (True, "Digest enviado por Telegram con 1 ofertas.", offers),
+        )
+
+        logs = run_fresh_monitor(session, settings, force_all=True)
+
+        offers = list_offers(session)
+        assert len(offers) == 1
+        assert offers[0].portal == "sena"
+        assert offers[0].telegram_notified is True
+        assert calls == [[offers[0].id]]
+        assert any("[telegram] preparing_message" in line for line in logs)
+        assert any("[telegram] including_sena_jobs=1" in line for line in logs)
+        assert any("[telegram] sena_sent=true" in line for line in logs)
+        assert any("digest enviado con 1 ofertas" in line for line in logs)
+
+
 def test_monitor_continues_if_one_portal_fails(tmp_path: Path, monkeypatch):
     settings = _settings(tmp_path)
     engine = create_sqlite_engine(settings.db_path)

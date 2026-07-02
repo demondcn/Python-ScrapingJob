@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+import logging
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,6 +20,7 @@ from .settings import Settings
 
 AUTO_PAUSE_FAILURE_THRESHOLD = 3
 AUTO_PAUSE_DURATION = timedelta(hours=24)
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -50,15 +52,27 @@ def add_source(
     interval_minutes: int = 15,
     min_interval_minutes: int = 10,
 ) -> JobSearchSource:
+    normalized_portal = portal.strip().lower()
     normalized_interval = _validate_interval(interval_minutes, min_interval_minutes)
     normalized_search_url = normalize_linkedin_source_url(
-        portal,
+        normalized_portal,
         search_url,
         keywords=keywords,
         location=location,
     )
+    existing_source = session.scalar(
+        select(JobSearchSource).where(JobSearchSource.search_url == normalized_search_url).order_by(JobSearchSource.id.asc())
+    )
+    if existing_source is not None:
+        setattr(existing_source, "_jobops_duplicate_skipped", True)
+        if normalized_portal == "sena":
+            logger.info("[dedup] sena_duplicate_source_skipped=true")
+            logger.info("[dedup] url=%s", normalized_search_url)
+        else:
+            logger.info("[dedup] duplicate_source_skipped=true portal=%s url=%s", normalized_portal, normalized_search_url)
+        return existing_source
     source = JobSearchSource(
-        portal=portal.strip().lower(),
+        portal=normalized_portal,
         target_role=target_role.strip(),
         search_url=normalized_search_url,
         keywords=keywords.strip(),

@@ -12,8 +12,17 @@ from src.jobops_assistant.scrapers.base_scraper import ScrapedJob, SourceBlocked
 from src.jobops_assistant.scrapers import playwright_base as playwright_base_module
 from src.jobops_assistant.scrapers.computrabajo_playwright_scraper import ComputrabajoPlaywrightJobScraper
 from src.jobops_assistant.scrapers.indeed_playwright_scraper import IndeedPlaywrightJobScraper
+from src.jobops_assistant.scrapers.indeed_playwright_scraper import INDEED_PLAYWRIGHT_LOGIN_URL
 from src.jobops_assistant.scrapers.linkedin_playwright_scraper import LinkedInPlaywrightJobScraper
-from src.jobops_assistant.scrapers.registry import get_scraper, list_supported_portals, source_uses_persistent_auth
+from src.jobops_assistant.scrapers.registry import (
+    DisabledPortalScraper,
+    get_portal_reference_urls,
+    get_scraper,
+    is_portal_enabled_by_default,
+    list_supported_portals,
+    source_uses_persistent_auth,
+)
+from src.jobops_assistant.scrapers.sena_scraper import SENA_DEFAULT_SOURCE_URLS
 from src.jobops_assistant.settings import Settings
 
 
@@ -209,6 +218,52 @@ def test_indeed_playwright_extracts_public_cards(tmp_path: Path):
     assert jobs[0].portal == "indeed_playwright"
     assert jobs[0].url == "https://co.indeed.com/viewjob?jk=3360d1c08d0546d6"
     assert driver.quit_called is True
+
+
+def test_indeed_playwright_requests_manual_login_and_reuses_session(tmp_path: Path, monkeypatch):
+    source_url = "https://co.indeed.com/jobs?q=backend"
+    driver = _MappedDriver(
+        {
+            source_url: [
+                {
+                    "html": "<html><body><main><h1>Sign in</h1><p>Continue with Google</p></main></body></html>",
+                    "current_url": "https://secure.indeed.com/account/login",
+                },
+                {
+                    "html": """
+                    <html>
+                      <body>
+                        <nav aria-label="Account"></nav>
+                        <div class="job_seen_beacon">
+                          <h2 class="jobTitle"><a href="/rc/clk?jk=3360d1c08d0546d6"><span>Backend Junior</span></a></h2>
+                          <span class="companyName">Acme Backend</span>
+                          <div class="companyLocation">Remoto</div>
+                        </div>
+                      </body>
+                    </html>
+                    """,
+                    "current_url": source_url,
+                },
+            ],
+            INDEED_PLAYWRIGHT_LOGIN_URL: {
+                "html": "<html><body><form><input name='__email' /></form></body></html>",
+                "current_url": INDEED_PLAYWRIGHT_LOGIN_URL,
+            },
+        }
+    )
+    monkeypatch.setattr("builtins.input", lambda: "")
+    scraper = IndeedPlaywrightJobScraper(_settings(tmp_path), driver_factory=lambda: driver)
+    source = _source("indeed_playwright", source_url)
+    source.interactive_login = True
+
+    jobs = scraper.scrape(source)
+
+    assert len(jobs) == 1
+    assert jobs[0].title == "Backend Junior"
+    assert jobs[0].portal == "indeed_playwright"
+    assert scraper.session_active is True
+    assert scraper.session_mode == "logged_in"
+    assert driver.visited_urls == [source_url, INDEED_PLAYWRIGHT_LOGIN_URL, source_url]
 
 
 def test_computrabajo_playwright_loads_page(tmp_path: Path):
@@ -531,18 +586,35 @@ def test_playwright_test_cli_builds_linkedin_url_when_url_is_missing(tmp_path: P
     assert "sortBy=DD" in output
 
 
-def test_playwright_portals_are_registered(tmp_path: Path):
+def test_playwright_registry_keeps_computrabajo_visible_but_disabled_by_default(tmp_path: Path):
     portals = list_supported_portals()
+    enabled_portals = list_supported_portals(include_disabled=False)
 
     assert "linkedin_playwright" in portals
     assert "computrabajo_playwright" in portals
     assert "indeed_playwright" in portals
     assert "linkedin_selenium" not in portals
     assert "indeed_selenium" not in portals
+    assert "computrabajo" not in enabled_portals
+    assert "computrabajo_playwright" not in enabled_portals
     assert isinstance(get_scraper("linkedin_playwright", _settings(tmp_path)), LinkedInPlaywrightJobScraper)
-    assert isinstance(get_scraper("computrabajo", _settings(tmp_path)), ComputrabajoPlaywrightJobScraper)
     assert isinstance(get_scraper("indeed_playwright", _settings(tmp_path)), IndeedPlaywrightJobScraper)
+    assert isinstance(get_scraper("computrabajo", _settings(tmp_path)), DisabledPortalScraper)
     assert source_uses_persistent_auth("linkedin_playwright") is True
+    assert is_portal_enabled_by_default("ricardo_jobs") is False
+    assert get_portal_reference_urls("sena") == SENA_DEFAULT_SOURCE_URLS
+
+
+def test_disabled_computrabajo_scraper_returns_empty_snapshot(tmp_path: Path):
+    scraper = get_scraper("computrabajo", _settings(tmp_path))
+
+    jobs = scraper.scrape(_source("computrabajo", "https://computrabajo.example/jobs"))
+
+    snapshot = scraper.get_last_debug_snapshot()
+    assert jobs == []
+    assert snapshot is not None
+    assert snapshot.final_url == "https://computrabajo.example/jobs"
+    assert snapshot.block_reason == "portal deshabilitado por defecto en registry"
 
 
 def test_computrabajo_playwright_blocked_page_returns_empty(tmp_path: Path):

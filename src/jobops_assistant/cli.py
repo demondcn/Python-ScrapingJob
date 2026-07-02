@@ -47,6 +47,7 @@ from .scrapers.registry import (
     get_scraper,
     is_deprecated_portal_alias,
     list_supported_portals,
+    portal_supports_flexible_targets,
     source_uses_persistent_auth,
 )
 from .search_sources import (
@@ -702,7 +703,7 @@ def _handle_sources_add(args, session: Session, settings, session_factory) -> in
         print(f"Portal no soportado: {portal}")
         print("Disponibles: " + ", ".join(list_supported_portals()))
         return 1
-    if args.target_role not in get_available_targets():
+    if not portal_supports_flexible_targets(portal) and args.target_role not in get_available_targets():
         print(f"Target no soportado: {args.target_role}")
         print("Disponibles: " + ", ".join(get_available_targets()))
         return 1
@@ -720,6 +721,9 @@ def _handle_sources_add(args, session: Session, settings, session_factory) -> in
     except ValueError as exc:
         print(str(exc))
         return 1
+    if getattr(source, "_jobops_duplicate_skipped", False):
+        print(f"Fuente ya existente: {source.portal} -> {source.search_url}")
+        return 0
     print(f"Fuente agregada con id {source.id}: {source.portal} -> {source.search_url}")
     return 0
 
@@ -913,7 +917,7 @@ def _handle_playwright_test(args, session: Session, settings, session_factory) -
         enabled=True,
         interval_minutes=max(30, settings.min_monitor_interval_minutes),
     )
-    if portal == "linkedin_playwright":
+    if portal in {"linkedin_playwright", "indeed_playwright"}:
         source.interactive_login = True
     result, scraper = _run_source_test_with_scraper(settings, source)
     print(f"Portal: {portal}")
@@ -921,6 +925,9 @@ def _handle_playwright_test(args, session: Session, settings, session_factory) -
     if portal == "linkedin_playwright":
         print(f"Sesion activa: {'yes' if getattr(scraper, 'session_active', False) else 'no'}")
         print(f"Modo LinkedIn: {getattr(scraper, 'session_mode', 'public')}")
+    if portal == "indeed_playwright":
+        print(f"Sesion activa: {'yes' if getattr(scraper, 'session_active', False) else 'no'}")
+        print(f"Modo Indeed: {getattr(scraper, 'session_mode', 'public')}")
     if result.error:
         print(f"Error: {result.error}")
         return 1
