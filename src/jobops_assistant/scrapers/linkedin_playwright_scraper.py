@@ -1,3 +1,4 @@
+#linkedin_playwright_scraper.py
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -22,15 +23,79 @@ from .linkedin_selenium_scraper import (
     _has_easy_apply_signal,
     _has_external_apply_signal,
     _normalize_application_text,
-    has_linkedin_job_cards,
-    has_logged_in_linkedin_job_cards,
-    has_public_linkedin_job_cards,
 )
 from .playwright_base import PlaywrightJobScraper
 
 LINKEDIN_PLAYWRIGHT_MANUAL_LOGIN_MESSAGE = (
     "LinkedIn Playwright: inicia sesion manualmente en la ventana abierta y presiona ENTER para continuar."
 )
+
+LINKEDIN_PLAYWRIGHT_PUBLIC_CARD_SELECTORS = (
+    "div.base-card",
+    "div.base-search-card",
+    "div.job-search-card",
+    "ul.jobs-search__results-list li",
+    "a.base-card__full-link[href]",
+)
+
+LINKEDIN_PLAYWRIGHT_LOGGED_CARD_SELECTORS = (
+    "li.jobs-search-results__list-item",
+    "li[data-occludable-job-id]",
+    "div[data-job-id]",
+    "div.job-card-container",
+    "div.job-card-list",
+    "a.job-card-container__link[href]",
+    "a.job-card-list__title[href]",
+)
+
+LINKEDIN_PLAYWRIGHT_JOB_LINK_SELECTORS = (
+    "a[href*='/jobs/view/'][href]",
+    "a[href*='linkedin.com/jobs/view/'][href]",
+)
+
+LINKEDIN_INVALID_TITLE_TEXTS = {
+    "",
+    "ver empleo",
+    "ver oferta",
+    "view job",
+    "solicitar",
+    "solicitar ahora",
+    "apply",
+    "apply now",
+    "guardar",
+    "save",
+    "promocionado",
+    "promoted",
+}
+
+
+def _soup_has_any_selector(soup, selectors: tuple[str, ...]) -> bool:
+    return any(soup.select_one(selector) for selector in selectors)
+
+
+def has_playwright_public_linkedin_job_cards(soup) -> bool:
+    if _soup_has_any_selector(soup, LINKEDIN_PLAYWRIGHT_PUBLIC_CARD_SELECTORS):
+        return True
+    return bool(soup.select_one("ul.jobs-search__results-list a[href*='/jobs/view/'][href]"))
+
+
+def has_playwright_logged_in_linkedin_job_cards(soup) -> bool:
+    if _soup_has_any_selector(soup, LINKEDIN_PLAYWRIGHT_LOGGED_CARD_SELECTORS):
+        return True
+
+    list_container = soup.select_one(
+        "div.scaffold-layout__list-container, "
+        "section.jobs-search-results-list, "
+        "main"
+    )
+    if list_container and list_container.select_one("a[href*='/jobs/view/'][href]"):
+        return True
+
+    return False
+
+
+def has_playwright_linkedin_job_cards(soup) -> bool:
+    return has_playwright_public_linkedin_job_cards(soup) or has_playwright_logged_in_linkedin_job_cards(soup)
 
 
 class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
@@ -40,15 +105,12 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
     login_error_message = LINKEDIN_BLOCKED_MESSAGE
 
     card_selectors = (
-        "div.base-card",
-        "div.base-search-card",
-        "div.job-search-card",
-        "li.jobs-search-results__list-item",
-        "div.job-card-container",
-        "div.job-card-list",
-        "ul.jobs-search__results-list li",
+        *LINKEDIN_PLAYWRIGHT_PUBLIC_CARD_SELECTORS,
+        *LINKEDIN_PLAYWRIGHT_LOGGED_CARD_SELECTORS,
         "div.scaffold-layout__list-container li",
+        *LINKEDIN_PLAYWRIGHT_JOB_LINK_SELECTORS,
     )
+
     title_selectors = (
         "h3.base-search-card__title",
         ".base-search-card__title",
@@ -62,10 +124,14 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
         ".job-card-container__title",
         ".artdeco-entity-lockup__title strong",
         ".artdeco-entity-lockup__title",
+        "a[href*='/jobs/view/'] strong",
+        "a[href*='/jobs/view/'] span[aria-hidden='true']",
+        "a[href*='/jobs/view/']",
         "a.base-card__full-link",
         "strong",
         "h3",
     )
+
     company_selectors = (
         "h4.base-search-card__subtitle",
         ".base-search-card__subtitle",
@@ -78,6 +144,7 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
         ".job-card-container__subtitle",
         "h4",
     )
+
     location_selectors = (
         "span.job-search-card__location",
         ".job-search-card__location",
@@ -89,17 +156,20 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
         ".job-search-card__metadata",
         ".job-card-container__metadata-wrapper",
     )
+
     link_selectors = (
         "a.base-card__full-link[href]",
         "a.job-card-container__link[href]",
         "a.job-card-list__title[href]",
-        "a[href*='/jobs/view/'][href]",
+        *LINKEDIN_PLAYWRIGHT_JOB_LINK_SELECTORS,
     )
+
     posted_selectors = (
         "time.job-search-card__listdate",
         "time.job-search-card__listdate--new",
         "time",
     )
+
     description_selectors = (
         "div.description__text",
         ".job-search-card__snippet",
@@ -109,6 +179,7 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
         ".job-card-list__insight",
         ".base-search-card__metadata",
     )
+
     ready_selectors = (
         *card_selectors,
         "div.global-nav",
@@ -168,13 +239,25 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
         find_elements = getattr(driver, "find_elements", None)
         if not callable(find_elements):
             return False
-        for selector in self.card_selectors:
+        for selector in (*self.card_selectors, *self.link_selectors):
             try:
                 if find_elements(None, selector):
                     return True
             except Exception:
                 continue
         return False
+    #fix 1
+    def _wait_for_card_footers_hydrated(self, driver, *, timeout: float = 4.0, poll: float = 0.3) -> None:
+        """Espera a que LinkedIn termine de hidratar el footer de las cards
+        (donde vive el badge de 'Solicitud sencilla'). Mientras esa parte
+        siga en estado 'ghost/skeleton', application_type sale como unknown."""
+        elapsed = 0.0
+        while elapsed < timeout:
+            html = getattr(driver, "page_source", "") or ""
+            if "job-card-container__ghost-footer-item" not in html:
+                return
+            self._wait_for_timeout(driver, poll)
+            elapsed += poll
 
     def _load_rendered_html(self, driver, requested_url: str, selectors: tuple[str, ...]) -> tuple[str, str, int | None]:
         driver.set_page_load_timeout(self._get_effective_page_load_timeout())
@@ -183,9 +266,15 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
             self._wait_for_rendered_dom(driver, selectors)
             if not self._driver_has_linkedin_cards(driver):
                 self._scroll_page(driver)
+            #fix 2
+            self._wait_for_card_footers_hydrated(driver)
             html = getattr(driver, "page_source", "") or ""
             final_url = getattr(driver, "current_url", "") or requested_url
             self._log_playwright(f"Playwright: html_length={len(html)}")
+
+            if getattr(self.settings, "playwright_debug_linkedin", False):
+                self._debug_linkedin_html(html)
+
             return html, final_url, 200 if html else None
         except Exception as exc:
             current_html = getattr(driver, "page_source", "") or ""
@@ -223,49 +312,34 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
 
     def parse_search_results(self, html: str, source) -> list[ScrapedJob]:
         soup = self._soup(html)
-        if has_logged_in_linkedin_job_cards(soup):
+        cards = list(self._select_cards(soup))
+        job_links_count = len(soup.select("a[href*='/jobs/view/'][href]"))
+
+        if has_playwright_logged_in_linkedin_job_cards(soup):
             print(LINKEDIN_LOGGED_EXTRACTION_MESSAGE)
+
+        self._log_playwright(
+            f"[linkedin_playwright] parse_debug cards={len(cards)} job_links={job_links_count}"
+        )
+
         results: list[ScrapedJob] = []
         seen_urls: set[str] = set()
-        for card in self._select_cards(soup):
-            url = self._first_attr(card, self.link_selectors, "href")
-            title = self._first_text(card, self.title_selectors)
-            if not url or not title:
-                continue
 
-            absolute_url = self._absolute_linkedin_url(source, url)
-            normalized_url = self.normalize_url(absolute_url)
-            if not normalized_url or normalized_url in seen_urls:
-                continue
-            seen_urls.add(normalized_url)
+        for card in cards:
+            job = self._job_from_card(card, source, seen_urls)
+            if job is not None:
+                results.append(job)
 
-            company = self._first_text(card, self.company_selectors)
-            location = self._first_text(card, self.location_selectors)
-            raw_posted_text = self._first_text(card, self.posted_selectors)
-            description = self._extract_card_description(card, location, raw_posted_text)
-            application_type = self._detect_application_type_from_node(card)
-            results.append(
-                ScrapedJob(
-                    title=title,
-                    company=company,
-                    portal=self.portal_name,
-                    location=location,
-                    modality=self._infer_modality(location, description),
-                    salary="",
-                    url=normalized_url,
-                    description=description,
-                    requirements="",
-                    published_at=self._parse_published_at(raw_posted_text),
-                    found_at=datetime.now(UTC),
-                    raw_posted_text=raw_posted_text,
-                    source_id=source.id,
-                    application_type=application_type,
-                )
-            )
+        if not results:
+            self._log_playwright("[linkedin_playwright] card_parser_empty=true fallback=job_links")
+            for job in self._extract_jobs_from_links(soup, source, seen_urls):
+                results.append(job)
+
         visible_detail = self._extract_detail_description(html)
         if visible_detail and results and not results[0].description:
             results[0].description = visible_detail
             results[0].modality = self._infer_modality(results[0].location, visible_detail)
+
         visible_detail_application_type = self._detect_application_type_from_detail_panel(html)
         if (
             visible_detail_application_type != UNKNOWN_APPLICATION_TYPE
@@ -273,7 +347,152 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
             and results[0].application_type == UNKNOWN_APPLICATION_TYPE
         ):
             results[0].application_type = visible_detail_application_type
+
+        self._log_playwright(f"[linkedin_playwright] parsed_jobs={len(results)}")
         return results
+
+    def _job_from_card(self, card: Tag, source, seen_urls: set[str]) -> ScrapedJob | None:
+        url = self._extract_url_from_card(card)
+        title = self._extract_title_from_card(card)
+
+        if not url or not title:
+            return None
+
+        absolute_url = self._absolute_linkedin_url(source, url)
+        normalized_url = self.normalize_url(absolute_url)
+        if not normalized_url or normalized_url in seen_urls:
+            return None
+        seen_urls.add(normalized_url)
+
+        company = self._first_text(card, self.company_selectors)
+        location = self._first_text(card, self.location_selectors)
+        raw_posted_text = self._first_text(card, self.posted_selectors)
+        description = self._extract_card_description(card, location, raw_posted_text)
+        application_type = self._detect_application_type_from_node(card)
+
+        return ScrapedJob(
+            title=title,
+            company=company,
+            portal=self.portal_name,
+            location=location,
+            modality=self._infer_modality(location, description),
+            salary="",
+            url=normalized_url,
+            description=description,
+            requirements="",
+            published_at=self._parse_published_at(raw_posted_text),
+            found_at=datetime.now(UTC),
+            raw_posted_text=raw_posted_text,
+            source_id=source.id,
+            application_type=application_type,
+        )
+
+    def _extract_jobs_from_links(self, soup, source, seen_urls: set[str]) -> list[ScrapedJob]:
+        results: list[ScrapedJob] = []
+        links = soup.select("a[href*='/jobs/view/'][href], a[href*='linkedin.com/jobs/view/'][href]")
+
+        for link in links:
+            if not isinstance(link, Tag):
+                continue
+
+            card = self._find_nearest_job_container(link) or link
+            job = self._job_from_card(card, source, seen_urls)
+            if job is not None:
+                results.append(job)
+
+        return results
+
+    def _extract_url_from_card(self, card: Tag) -> str:
+        for link in self._iter_candidate_job_links(card):
+            href = str(link.get("href") or "").strip()
+            if "/jobs/view/" in href or "linkedin.com/jobs/view/" in href:
+                return href
+        return self._first_attr(card, self.link_selectors, "href")
+
+    def _extract_title_from_card(self, card: Tag) -> str:
+        title = self._first_text(card, self.title_selectors)
+        if self._is_valid_linkedin_title(title):
+            return title
+
+        for link in self._iter_candidate_job_links(card):
+            for value in (
+                link.get_text(" ", strip=True),
+                str(link.get("aria-label") or ""),
+                str(link.get("title") or ""),
+            ):
+                cleaned = self._clean_text(value)
+                if self._is_valid_linkedin_title(cleaned):
+                    return cleaned
+
+        return ""
+
+    def _iter_candidate_job_links(self, card: Tag) -> list[Tag]:
+        links: list[Tag] = []
+        seen: set[int] = set()
+
+        def add_link(node) -> None:
+            if not isinstance(node, Tag):
+                return
+            href = str(node.get("href") or "")
+            if "/jobs/view/" not in href and "linkedin.com/jobs/view/" not in href:
+                return
+            node_id = id(node)
+            if node_id in seen:
+                return
+            seen.add(node_id)
+            links.append(node)
+
+        if isinstance(card, Tag) and card.name == "a":
+            add_link(card)
+
+        for selector in self.link_selectors:
+            try:
+                for link in card.select(selector):
+                    add_link(link)
+            except Exception:
+                continue
+
+        return links
+
+    def _find_nearest_job_container(self, link: Tag) -> Tag | None:
+        for parent in link.parents:
+            if not isinstance(parent, Tag):
+                continue
+
+            class_text = " ".join(parent.get("class", [])).casefold()
+            data_job_id = parent.get("data-job-id") or parent.get("data-occludable-job-id")
+
+            if data_job_id:
+                return parent
+
+            if parent.name == "li" and (
+                "jobs-search-results__list-item" in class_text
+                or "job-card" in class_text
+                or parent.select_one("a[href*='/jobs/view/'][href]")
+            ):
+                return parent
+
+            if parent.name == "div" and (
+                "job-card" in class_text
+                or "artdeco-entity-lockup" in class_text
+                or "job-search-card" in class_text
+            ):
+                return parent
+
+        return link
+
+    def _is_valid_linkedin_title(self, value: str) -> bool:
+        cleaned = self._clean_text(value)
+        normalized = self._normalize_text(cleaned)
+        if len(cleaned) < 3:
+            return False
+        if normalized in LINKEDIN_INVALID_TITLE_TEXTS:
+            return False
+        if normalized.startswith("ver ") or normalized.startswith("view "):
+            return False
+        if normalized.startswith("guardar") or normalized.startswith("save"):
+            return False
+        return True
 
     def fetch_job_detail(self, job: ScrapedJob, source) -> ScrapedJob:
         if not getattr(self.settings, "linkedin_fetch_details", False):
@@ -319,7 +538,7 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
         return urljoin(source.search_url, url)
 
     def has_public_job_content(self, html: str) -> bool:
-        return has_linkedin_job_cards(self._soup(html))
+        return has_playwright_linkedin_job_cards(self._soup(html))
 
     def has_empty_results_content(self, html: str) -> bool:
         soup = self._soup(html)
@@ -337,9 +556,10 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
 
     def _detect_blocked_content(self, html: str) -> None:
         soup = self._soup(html)
-        has_public_cards = has_public_linkedin_job_cards(soup)
-        has_logged_cards = has_logged_in_linkedin_job_cards(soup)
+        has_public_cards = has_playwright_public_linkedin_job_cards(soup)
+        has_logged_cards = has_playwright_logged_in_linkedin_job_cards(soup)
         has_cards = has_public_cards or has_logged_cards
+
         if has_public_cards:
             print(LINKEDIN_PUBLIC_CARDS_MESSAGE)
             return
@@ -349,9 +569,11 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
         if self.has_empty_results_content(html):
             print(LINKEDIN_EMPTY_RESULTS_MESSAGE)
             return
+
         current_url = ""
         if self.last_response_debug is not None:
             current_url = self.last_response_debug.final_url
+
         reason, kind = self._detect_linkedin_block_reason(
             html,
             has_public_content=has_cards,
@@ -360,6 +582,7 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
         )
         if not reason:
             return
+
         self._set_block_reason(reason)
         if kind in {"login", "blocked"}:
             print(LINKEDIN_AUTHWALL_WITHOUT_CARDS_MESSAGE)
@@ -371,22 +594,24 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
 
     def _needs_manual_login(self, html: str, current_url: str) -> bool:
         soup = self._soup(html)
-        has_cards = has_linkedin_job_cards(soup)
+        has_cards = has_playwright_linkedin_job_cards(soup)
         reason, kind = self._detect_linkedin_block_reason(
             html,
             has_public_content=has_cards,
             require_public_content=False,
             current_url=current_url,
         )
-        return kind == "login" and not has_cards and not has_public_linkedin_job_cards(soup)
+        return kind == "login" and not has_cards and not has_playwright_public_linkedin_job_cards(soup)
 
     def _is_logged_in_session(self, html: str, current_url: str) -> bool:
         soup = self._soup(html)
-        if has_logged_in_linkedin_job_cards(soup):
+        if has_playwright_logged_in_linkedin_job_cards(soup):
             return True
+
         current_url_normalized = self._normalize_text(current_url)
         if "/login" in current_url_normalized or "authwall" in current_url_normalized or "checkpoint" in current_url_normalized:
             return False
+
         visible_text = self._normalize_text(soup.get_text(" ", strip=True))
         nav_signals = (
             "mi red empleos mensajes notificaciones yo",
@@ -522,6 +747,7 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
 
         if require_public_content and not has_public_content:
             return "sin cards publicas de LinkedIn", "blocked"
+
         return "", ""
 
     def _click_show_more_button(self, driver) -> None:
@@ -543,6 +769,28 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
             except Exception:
                 continue
 
+    def _debug_linkedin_html(self, html: str) -> None:
+        try:
+            with open("debug_linkedin.html", "w", encoding="utf-8") as file:
+                file.write(html)
+
+            soup = self._soup(html)
+
+            total_links = len(soup.select("a"))
+            job_links = len(soup.select("a[href*='/jobs/view/'][href]"))
+            cards = len(list(self._select_cards(soup)))
+
+            self._log_playwright("[linkedin_playwright] debug_html_saved=debug_linkedin.html")
+            self._log_playwright(
+                "[linkedin_playwright] debug_counts "
+                f"links={total_links} "
+                f"job_links={job_links} "
+                f"cards={cards}"
+            )
+
+        except Exception as exc:
+            self._log_playwright(f"[linkedin_playwright] debug_html_save_error={exc}")
+
     def _build_debug_snapshot(self, requested_url: str, final_url: str, html: str, status_code: int | None):
         from .base_scraper import ResponseDebugSnapshot
 
@@ -550,6 +798,6 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper):
             requested_url=requested_url,
             status_code=status_code,
             final_url=self._clean_text(final_url),
-            content_type="text/html",
+                content_type="text/html",
             html=html,
         )
