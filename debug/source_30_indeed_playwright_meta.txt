@@ -1,0 +1,7 @@
+requested_url: https://co.indeed.com/jobs?q=junior%20backend&l=Bogot%C3%A1%2C%20Cundinamarca&fromage=1&radius=25&from=searchOnDesktopSerp
+status_code: None
+final_url: https://co.indeed.com/jobs?q=junior%20backend&l=Bogot%C3%A1%2C%20Cundinamarca&fromage=1&radius=25&from=searchOnDesktopSerp
+content_type: text/html
+html_size: 0
+block_reason: none
+html_preview:
