@@ -31,6 +31,8 @@ def _settings(
     *,
     enable_playwright: bool = True,
     linkedin_fetch_details: bool = False,
+    playwright_fast_mode: bool = True,
+    playwright_ultra_fast_mode: bool = False,
     playwright_user_data_dir: str = "./data/browser_profiles/playwright_linkedin",
 ) -> Settings:
     return Settings(
@@ -50,6 +52,8 @@ def _settings(
         generated_dir=tmp_path / "generated",
         enable_playwright=enable_playwright,
         playwright_headless=False,
+        playwright_fast_mode=playwright_fast_mode,
+        playwright_ultra_fast_mode=playwright_ultra_fast_mode,
         playwright_user_data_dir=playwright_user_data_dir,
         playwright_page_load_timeout=1,
         playwright_scroll_pause=0,
@@ -191,6 +195,28 @@ class _MappedDriver(_FakeDriver):
             return
         self.page_source = str(payload or "")
         self.current_url = url
+
+
+class _LinkedInCountingDriver(_FakeDriver):
+    def __init__(self, html: str, *, current_url: str = "https://www.linkedin.com/jobs/search/") -> None:
+        super().__init__(html, current_url=current_url)
+        self._html = html
+        self.page_source_reads = 0
+
+    @property
+    def page_source(self) -> str:
+        self.page_source_reads += 1
+        return self._html
+
+    @page_source.setter
+    def page_source(self, value: str) -> None:
+        self._html = value
+
+    def find_elements(self, by, selector: str):
+        try:
+            return [object() for _ in BeautifulSoup(self._html or "", "html.parser").select(selector)]
+        except Exception:
+            return []
 
 
 def test_indeed_playwright_extracts_public_cards(tmp_path: Path):
@@ -477,6 +503,129 @@ def test_linkedin_playwright_extracts_public_cards(tmp_path: Path):
     assert jobs[0].portal == "linkedin_playwright"
     assert jobs[0].url == "https://www.linkedin.com/jobs/view/123"
     assert scraper.session_active is False
+
+
+def test_linkedin_playwright_fast_mode_reduces_timeout_and_skips_scroll_when_cards_exist(tmp_path: Path):
+    html = """
+    <ul class="jobs-search__results-list">
+      <li>
+        <div class="base-card base-search-card">
+          <h3 class="base-search-card__title">Backend Junior</h3>
+          <h4 class="base-search-card__subtitle">Acme Backend</h4>
+          <span class="job-search-card__location">Bogota</span>
+          <a class="base-card__full-link" href="https://www.linkedin.com/jobs/view/321">Ver</a>
+        </div>
+      </li>
+    </ul>
+    """
+    settings = _settings(tmp_path)
+    settings.playwright_page_load_timeout = 30
+    driver = _FakeDriver(html)
+    scraper = LinkedInPlaywrightJobScraper(settings, driver_factory=lambda: driver)
+
+    jobs = scraper.scrape(_source("linkedin_playwright", "https://www.linkedin.com/jobs/search/?keywords=backend"))
+
+    assert len(jobs) == 1
+    assert driver.timeout == 15
+    assert driver.scrolls == 0
+    assert [state for state, _ in driver.load_states] == ["domcontentloaded"]
+
+
+def test_linkedin_playwright_reads_dom_once_when_cards_exist(tmp_path: Path):
+    html = """
+    <ul class="jobs-search__results-list">
+      <li>
+        <div class="base-card base-search-card">
+          <h3 class="base-search-card__title">Platform Engineer</h3>
+          <h4 class="base-search-card__subtitle">Infra Labs</h4>
+          <span class="job-search-card__location">Bogota</span>
+          <a class="base-card__full-link" href="https://www.linkedin.com/jobs/view/777">Ver</a>
+        </div>
+      </li>
+    </ul>
+    """
+    settings = _settings(tmp_path)
+    settings.playwright_page_load_timeout = 30
+    driver = _LinkedInCountingDriver(html)
+    scraper = LinkedInPlaywrightJobScraper(settings, driver_factory=lambda: driver)
+
+    jobs = scraper.scrape(_source("linkedin_playwright", "https://www.linkedin.com/jobs/search/?keywords=platform"))
+
+    assert len(jobs) == 1
+    assert driver.page_source_reads == 1
+    assert driver.scrolls == 0
+
+
+def test_linkedin_playwright_fast_mode_stops_scroll_early_when_cards_appear(tmp_path: Path):
+    class _CardsAfterFirstScrollDriver(_FakeDriver):
+        def execute_script(self, script: str) -> None:
+            super().execute_script(script)
+            if self.scrolls == 1:
+                self.page_source = """
+                <ul class="jobs-search__results-list">
+                  <li>
+                    <div class="base-card base-search-card">
+                      <h3 class="base-search-card__title">Data Engineer</h3>
+                      <h4 class="base-search-card__subtitle">Acme Data</h4>
+                      <span class="job-search-card__location">Remoto</span>
+                      <a class="base-card__full-link" href="https://www.linkedin.com/jobs/view/654">Ver</a>
+                    </div>
+                  </li>
+                </ul>
+                """
+
+    settings = _settings(tmp_path)
+    settings.playwright_page_load_timeout = 30
+    settings.playwright_max_scrolls = 5
+    driver = _CardsAfterFirstScrollDriver("<html><body><div class='global-nav'></div></body></html>")
+    scraper = LinkedInPlaywrightJobScraper(settings, driver_factory=lambda: driver)
+
+    jobs = scraper.scrape(_source("linkedin_playwright", "https://www.linkedin.com/jobs/search/?keywords=data"))
+
+    assert len(jobs) == 1
+    assert driver.timeout == 15
+    assert driver.scrolls == 1
+
+
+def test_linkedin_playwright_does_not_retry_when_results_are_empty(tmp_path: Path):
+    driver = _FakeDriver(
+        "<html><body><main><p>No results found</p><p>Try different keywords.</p></main></body></html>"
+    )
+    scraper = LinkedInPlaywrightJobScraper(_settings(tmp_path), driver_factory=lambda: driver)
+
+    jobs = scraper.scrape(_source("linkedin_playwright", "https://www.linkedin.com/jobs/search/?keywords=unknown"))
+
+    assert jobs == []
+    assert driver.visited_urls == ["https://www.linkedin.com/jobs/search/?keywords=unknown&f_AL=true&sortBy=DD"]
+    assert driver.scrolls == 1
+    assert [state for state, _ in driver.load_states] == ["domcontentloaded"]
+
+
+def test_linkedin_playwright_ultra_fast_mode_disables_scroll_and_caps_timeout(tmp_path: Path):
+    html = """
+    <ul class="jobs-search__results-list">
+      <li>
+        <div class="base-card base-search-card">
+          <h3 class="base-search-card__title">DevOps Engineer</h3>
+          <h4 class="base-search-card__subtitle">Cloud Ops</h4>
+          <span class="job-search-card__location">Remoto</span>
+          <a class="base-card__full-link" href="https://www.linkedin.com/jobs/view/888">Ver</a>
+        </div>
+      </li>
+    </ul>
+    """
+    settings = _settings(tmp_path, playwright_ultra_fast_mode=True)
+    settings.playwright_page_load_timeout = 45
+    driver = _LinkedInCountingDriver(html)
+    scraper = LinkedInPlaywrightJobScraper(settings, driver_factory=lambda: driver)
+
+    jobs = scraper.scrape(_source("linkedin_playwright", "https://www.linkedin.com/jobs/search/?keywords=devops"))
+
+    assert len(jobs) == 1
+    assert driver.timeout == 20
+    assert driver.scrolls == 0
+    assert driver.page_source_reads == 1
+    assert driver.timeout_waits == []
 
 
 def test_linkedin_playwright_requests_manual_login_and_reuses_session(tmp_path: Path, monkeypatch):

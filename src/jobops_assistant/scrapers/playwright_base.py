@@ -529,17 +529,67 @@ class PlaywrightJobScraper(SelectorBasedScraper):
             return self.driver_factory()
         return build_playwright_driver(self.settings, self.portal_name, log_playwright=self.log_playwright)
 
-    def _load_rendered_html(self, driver, requested_url: str, selectors: tuple[str, ...]) -> tuple[str, str, int | None]:
-        driver.set_page_load_timeout(
-            getattr(self.settings, "playwright_page_load_timeout", getattr(self.settings, "scraper_timeout", 20))
+    def _is_fast_mode_enabled(self) -> bool:
+        return bool(getattr(self.settings, "playwright_fast_mode", True))
+
+    def _get_configured_page_load_timeout(self) -> int:
+        return max(
+            1,
+            int(getattr(self.settings, "playwright_page_load_timeout", getattr(self.settings, "scraper_timeout", 20)) or 1),
         )
+
+    def _get_effective_page_load_timeout(self) -> int:
+        return self._get_configured_page_load_timeout()
+
+    def _get_effective_wait_timeout(self) -> int:
+        return self._get_effective_page_load_timeout()
+
+    def _get_playwright_retry_attempts(self) -> int:
+        return 1 if self._is_fast_mode_enabled() else 2
+
+    def _get_effective_scroll_pause(self) -> float:
+        configured_pause = max(0.0, float(getattr(self.settings, "playwright_scroll_pause", 0) or 0.0))
+        if self._is_fast_mode_enabled():
+            if configured_pause <= 0:
+                return 0.25
+            return min(0.5, configured_pause)
+        return max(0.25, configured_pause)
+
+    def _get_effective_max_scrolls(self) -> int:
+        configured_scrolls = max(0, int(getattr(self.settings, "playwright_max_scrolls", 0) or 0))
+        if self._is_fast_mode_enabled():
+            return 1 if configured_scrolls <= 0 else min(2, configured_scrolls)
+        return configured_scrolls
+
+    def _should_return_early_after_initial_load(self, html: str) -> bool:
+        if not html:
+            return False
+        try:
+            return self.has_public_job_content(html)
+        except Exception:
+            return False
+
+    def _load_rendered_html(self, driver, requested_url: str, selectors: tuple[str, ...]) -> tuple[str, str, int | None]:
+        driver.set_page_load_timeout(self._get_effective_page_load_timeout())
         last_error: Exception | None = None
-        for attempt in range(2):
+        attempt_count = self._get_playwright_retry_attempts()
+        for attempt in range(attempt_count):
             try:
                 self._navigate_to_url(driver, requested_url)
                 self._wait_for_rendered_dom(driver, selectors)
+                html = getattr(driver, "page_source", "") or ""
+                final_url = getattr(driver, "current_url", "") or requested_url
+                if self._should_return_early_after_initial_load(html):
+                    self._log_playwright("Playwright: early exit after initial card detection")
+                    title = ""
+                    get_title = getattr(driver, "get_title", None)
+                    if callable(get_title):
+                        title = str(get_title() or "")
+                    if title:
+                        self._log_playwright(f"Playwright: page_title={title}")
+                    self._log_playwright(f"Playwright: html_length={len(html)}")
+                    return html, final_url, 200 if html else None
                 self._scroll_page(driver)
-                self._wait_for_rendered_dom(driver, selectors)
                 html = getattr(driver, "page_source", "") or ""
                 final_url = getattr(driver, "current_url", "") or requested_url
                 title = ""
@@ -554,8 +604,8 @@ class PlaywrightJobScraper(SelectorBasedScraper):
                 last_error = exc
                 current_html = getattr(driver, "page_source", "") or ""
                 current_url = getattr(driver, "current_url", "") or requested_url
-                if self._is_timeout_error(exc) and attempt == 0:
-                    self._log_playwright(f"Playwright: timeout, retry=1 url={requested_url}")
+                if self._is_timeout_error(exc) and attempt + 1 < attempt_count:
+                    self._log_playwright(f"Playwright: timeout, retry={attempt + 1} url={requested_url}")
                     continue
                 if current_html and self.has_public_job_content(current_html):
                     self._log_playwright(f"Playwright: carga parcial reutilizada tras error en {requested_url}")
@@ -569,11 +619,8 @@ class PlaywrightJobScraper(SelectorBasedScraper):
         self._log_playwright(f"Playwright: current_url after get: {getattr(driver, 'current_url', '')}")
 
     def _wait_for_rendered_dom(self, driver, selectors: tuple[str, ...]) -> None:
-        timeout = max(
-            1,
-            int(getattr(self.settings, "playwright_page_load_timeout", getattr(self.settings, "scraper_timeout", 20)) or 1),
-        )
-        stable_wait_seconds = max(0.25, float(getattr(self.settings, "playwright_scroll_pause", 0) or 0.25))
+        timeout = self._get_effective_wait_timeout()
+        stable_wait_seconds = self._get_effective_scroll_pause()
         wait_for_load_state = getattr(driver, "wait_for_load_state", None)
         wait_for_timeout = getattr(driver, "wait_for_timeout", None)
         if callable(wait_for_load_state):
@@ -583,12 +630,6 @@ class PlaywrightJobScraper(SelectorBasedScraper):
             if callable(wait_for_timeout):
                 wait_for_timeout(stable_wait_seconds)
             return
-        if callable(wait_for_load_state):
-            wait_for_load_state("networkidle", timeout=max(1, timeout // 2))
-            if callable(wait_supported) and wait_supported(selectors, timeout=max(1, timeout // 2)):
-                if callable(wait_for_timeout):
-                    wait_for_timeout(stable_wait_seconds)
-                return
 
         if callable(wait_for_timeout):
             wait_for_timeout(stable_wait_seconds)
@@ -599,8 +640,8 @@ class PlaywrightJobScraper(SelectorBasedScraper):
             sleep(pause)
 
     def _scroll_page(self, driver) -> None:
-        pause = max(0.25, float(getattr(self.settings, "playwright_scroll_pause", 0) or 0.25))
-        max_scrolls = max(0, int(getattr(self.settings, "playwright_max_scrolls", 0) or 0))
+        pause = self._get_effective_scroll_pause()
+        max_scrolls = self._get_effective_max_scrolls()
         wait_for_timeout = getattr(driver, "wait_for_timeout", None)
         if callable(wait_for_timeout):
             wait_for_timeout(pause)
@@ -612,6 +653,10 @@ class PlaywrightJobScraper(SelectorBasedScraper):
                 wait_for_timeout(pause)
             elif pause:
                 sleep(pause)
+            html = getattr(driver, "page_source", "") or ""
+            if self._should_return_early_after_initial_load(html):
+                self._log_playwright("Playwright: stopping scroll early after card detection")
+                break
 
     def _log_playwright(self, message: str) -> None:
         if self.log_playwright:

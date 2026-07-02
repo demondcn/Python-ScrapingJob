@@ -35,6 +35,8 @@ class Settings:
     selenium_profile_directory: str = ""
     enable_playwright: bool = True
     playwright_headless: bool = True
+    playwright_fast_mode: bool = True
+    playwright_ultra_fast_mode: bool = False
     playwright_user_data_dir: str = DEFAULT_PLAYWRIGHT_USER_DATA_DIR
     playwright_page_load_timeout: int = 30
     playwright_scroll_pause: int = 3
@@ -92,6 +94,8 @@ def load_settings() -> Settings:
         selenium_profile_directory=os.getenv("JOBOPS_SELENIUM_PROFILE_DIRECTORY", "").strip(),
         enable_playwright=_parse_bool(os.getenv("JOBOPS_ENABLE_PLAYWRIGHT", "true")),
         playwright_headless=_parse_bool(os.getenv("JOBOPS_PLAYWRIGHT_HEADLESS", "true")),
+        playwright_fast_mode=_parse_bool(os.getenv("JOBOPS_PLAYWRIGHT_FAST_MODE", "true")),
+        playwright_ultra_fast_mode=_parse_bool(os.getenv("JOBOPS_PLAYWRIGHT_ULTRA_FAST_MODE", "false")),
         playwright_user_data_dir=os.getenv(
             "JOBOPS_PLAYWRIGHT_USER_DATA_DIR",
             DEFAULT_PLAYWRIGHT_USER_DATA_DIR,

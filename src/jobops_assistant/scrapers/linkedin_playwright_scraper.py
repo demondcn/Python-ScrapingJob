@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from time import sleep
+
 from .linkedin_selenium_scraper import (
     LINKEDIN_LOGGED_CARDS_MESSAGE,
     LINKEDIN_PUBLIC_CARDS_MESSAGE,
@@ -27,6 +29,82 @@ class LinkedInPlaywrightJobScraper(PlaywrightJobScraper, LinkedInSeleniumJobScra
         super().__init__(settings, driver_factory=driver_factory, log_playwright=log_playwright)
         self.session_active = False
         self.session_mode = "public"
+
+    def _is_ultra_fast_mode_enabled(self) -> bool:
+        return bool(getattr(self.settings, "playwright_ultra_fast_mode", False))
+
+    def _get_effective_page_load_timeout(self) -> int:
+        timeout = super()._get_effective_page_load_timeout()
+        if self._is_ultra_fast_mode_enabled():
+            return max(1, min(20, timeout))
+        if not self._is_fast_mode_enabled():
+            return timeout
+        return max(1, min(15, int(timeout * 0.5) or 1))
+
+    def _get_playwright_retry_attempts(self) -> int:
+        return 1
+
+    def _get_linkedin_settle_seconds(self) -> float:
+        if self._is_ultra_fast_mode_enabled():
+            return 0.0
+        if self._is_fast_mode_enabled():
+            return 0.4
+        return min(0.5, max(0.3, float(getattr(self.settings, "playwright_scroll_pause", 0) or 0.3)))
+
+    def _wait_for_rendered_dom(self, driver, selectors: tuple[str, ...]) -> None:
+        timeout = self._get_effective_page_load_timeout()
+        wait_for_load_state = getattr(driver, "wait_for_load_state", None)
+        if callable(wait_for_load_state):
+            wait_for_load_state("domcontentloaded", timeout=timeout)
+        settle_seconds = self._get_linkedin_settle_seconds()
+        self._wait_for_timeout(driver, settle_seconds)
+
+    def _scroll_page(self, driver) -> None:
+        if self._is_ultra_fast_mode_enabled():
+            return
+        driver.execute_script("window.scrollBy(0, Math.max(700, Math.floor(window.innerHeight * 0.9)));")
+        self._click_show_more_button(driver)
+        self._wait_for_timeout(driver, 0.3 if self._is_fast_mode_enabled() else 0.5)
+
+    def _wait_for_timeout(self, driver, seconds: float) -> None:
+        wait_for_timeout = getattr(driver, "wait_for_timeout", None)
+        if seconds <= 0:
+            return
+        if callable(wait_for_timeout):
+            wait_for_timeout(seconds)
+            return
+        sleep(seconds)
+
+    def _driver_has_linkedin_cards(self, driver) -> bool:
+        find_elements = getattr(driver, "find_elements", None)
+        if not callable(find_elements):
+            return False
+        for selector in LinkedInSeleniumJobScraper.card_selectors:
+            try:
+                if find_elements(None, selector):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _load_rendered_html(self, driver, requested_url: str, selectors: tuple[str, ...]) -> tuple[str, str, int | None]:
+        driver.set_page_load_timeout(self._get_effective_page_load_timeout())
+        try:
+            self._navigate_to_url(driver, requested_url)
+            self._wait_for_rendered_dom(driver, selectors)
+            if not self._driver_has_linkedin_cards(driver):
+                self._scroll_page(driver)
+            html = getattr(driver, "page_source", "") or ""
+            final_url = getattr(driver, "current_url", "") or requested_url
+            self._log_playwright(f"Playwright: html_length={len(html)}")
+            return html, final_url, 200 if html else None
+        except Exception as exc:
+            current_html = getattr(driver, "page_source", "") or ""
+            current_url = getattr(driver, "current_url", "") or requested_url
+            if current_html and self.has_public_job_content(current_html):
+                self._log_playwright(f"Playwright: carga parcial reutilizada tras error en {requested_url}")
+                return current_html, current_url, 200
+            raise RuntimeError(str(exc) if exc is not None else "playwright load failed")
 
     def fetch_search_results(self, source) -> str:
         if not getattr(self.settings, "enable_playwright", False):
